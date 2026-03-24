@@ -4069,6 +4069,24 @@ impl CodeGen {
                     self.push("[(");
                     self.emit_expr(&args[0]);
                     self.push(") as usize]");
+                } else if self.is_builtin(method) {
+                    // Treat as a builtin call with obj prepended to args
+                    let mut builtin_args = vec![(**obj).clone()];
+                    builtin_args.extend(args.iter().cloned());
+                    if !self.try_emit_builtin_call(method, &builtin_args) {
+                        // Arity mismatch — fall back to Rust method call
+                        self.emit_expr(obj);
+                        self.push(".");
+                        self.push(method);
+                        self.push("(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                self.push(", ");
+                            }
+                            self.emit_expr(arg);
+                        }
+                        self.push(")");
+                    }
                 } else {
                     self.emit_expr(obj);
                     self.push(".");
@@ -7296,5 +7314,380 @@ mod tests {
         let rust = compile("fn main() = [1, 2, 3] |> map(fn(x) => x * 2) |> filter(fn(x) => x > 2)");
         assert!(rust.contains(".map("));
         assert!(rust.contains(".filter("));
+    }
+
+    // ── Type mapping correctness ────────────────────────────────
+
+    #[test]
+    fn test_type_map_int() {
+        let rust = compile("fn f(x: Int): Int = x");
+        assert!(rust.contains("i64"));
+    }
+
+    #[test]
+    fn test_type_map_float() {
+        let rust = compile("fn f(x: Float): Float = x");
+        assert!(rust.contains("f64"));
+    }
+
+    #[test]
+    fn test_type_map_bool() {
+        let rust = compile("fn f(x: Bool): Bool = x");
+        assert!(rust.contains("bool"));
+    }
+
+    #[test]
+    fn test_type_map_string() {
+        let rust = compile("fn f(x: String): String = x");
+        assert!(rust.contains("String"));
+    }
+
+    #[test]
+    fn test_type_map_list() {
+        let rust = compile("fn f(x: List<Int>): List<Int> = x");
+        assert!(rust.contains("Vec<i64>"));
+    }
+
+    #[test]
+    fn test_type_map_hashmap() {
+        let rust = compile("fn f(x: Map<String, Int>): Map<String, Int> = x");
+        assert!(rust.contains("HashMap<String, i64>"));
+    }
+
+    #[test]
+    fn test_type_map_hashset() {
+        let rust = compile("fn f(x: Set<Int>): Set<Int> = x");
+        assert!(rust.contains("HashSet<i64>"));
+    }
+
+    #[test]
+    fn test_type_map_deque() {
+        let rust = compile("fn f(x: Deque<Int>): Deque<Int> = x");
+        assert!(rust.contains("VecDeque<i64>"));
+    }
+
+    #[test]
+    fn test_type_map_heap() {
+        let rust = compile("fn f(x: Heap<Int>): Heap<Int> = x");
+        assert!(rust.contains("BinaryHeap<i64>"));
+    }
+
+    // ── Integer/Float literal suffixes ──────────────────────────
+
+    #[test]
+    fn test_int_literal_suffix() {
+        let rust = compile("fn main() = 42");
+        assert!(rust.contains("42i64"));
+    }
+
+    #[test]
+    fn test_float_literal_suffix() {
+        let rust = compile("fn main() = 3.14");
+        assert!(rust.contains("3.14f64"));
+    }
+
+    #[test]
+    fn test_negative_int_literal() {
+        let rust = compile("fn main() = -1");
+        assert!(rust.contains("-1i64") || rust.contains("-(1i64)"));
+    }
+
+    // ── String interpolation codegen ────────────────────────────
+
+    #[test]
+    fn test_string_interp_format() {
+        let rust = compile(r#"fn main() = "hello #{42} world""#);
+        assert!(rust.contains("format!"));
+    }
+
+    #[test]
+    fn test_string_interp_with_arithmetic() {
+        let rust = compile(r#"fn f(x: Int): String = "value: #{x + 1}""#);
+        assert!(rust.contains("format!"));
+    }
+
+    // ── Recursive type auto-boxing ──────────────────────────────
+
+    #[test]
+    fn test_recursive_enum_boxed() {
+        let rust = compile("type Tree =\n  | Leaf(Int)\n  | Node(Tree, Tree)");
+        assert!(rust.contains("Box<Tree>"));
+    }
+
+    #[test]
+    fn test_non_recursive_enum_no_box() {
+        let rust = compile("type Color =\n  | Red\n  | Green\n  | Blue");
+        assert!(!rust.contains("Box<"));
+    }
+
+    // ── Variant name qualification ──────────────────────────────
+
+    #[test]
+    fn test_variant_qualified_in_match() {
+        let rust = compile("type Color =\n  | Red\n  | Blue\n\nfn f(c: Color): Int = match c\n  | Red => 1\n  | Blue => 2\n  end");
+        assert!(rust.contains("Color::Red"));
+        assert!(rust.contains("Color::Blue"));
+    }
+
+    #[test]
+    fn test_variant_qualified_in_constructor() {
+        let rust = compile("type Opt =\n  | Some(Int)\n  | None\n\nfn main() = Some(42)");
+        assert!(rust.contains("Opt::Some("));
+    }
+
+    // ── For loop codegen ────────────────────────────────────────
+
+    #[test]
+    fn test_for_loop_emits_for() {
+        let rust = compile("fn main() = for x in [1, 2, 3] do\n  println(x)\nend");
+        assert!(rust.contains("for x in"));
+    }
+
+    #[test]
+    fn test_while_loop_emits_while() {
+        let rust = compile("fn main() = do\n  let mut i = 0\n  while i < 10 do\n    i += 1\n  end\nend");
+        assert!(rust.contains("while"));
+        assert!(rust.contains("i += 1"));
+    }
+
+    #[test]
+    fn test_break_in_loop() {
+        let rust = compile("fn main() = for x in [1, 2, 3] do\n  if x == 2 then break end\nend");
+        assert!(rust.contains("break"));
+    }
+
+    // ── Compound assignment ─────────────────────────────────────
+
+    #[test]
+    fn test_compound_assign_sub() {
+        let rust = compile("fn main() = do\n  let mut x = 10\n  x -= 3\nend");
+        assert!(rust.contains("-="));
+    }
+
+    #[test]
+    fn test_compound_assign_mul() {
+        let rust = compile("fn main() = do\n  let mut x = 2\n  x *= 5\nend");
+        assert!(rust.contains("*="));
+    }
+
+    // ── Mutable let bindings ────────────────────────────────────
+
+    #[test]
+    fn test_mut_let_codegen() {
+        let rust = compile("fn main() = do\n  let mut x = 0\n  x = 1\nend");
+        assert!(rust.contains("let mut x"));
+    }
+
+    // ── Tuple codegen ───────────────────────────────────────────
+
+    #[test]
+    fn test_tuple_pair_codegen() {
+        let rust = compile("fn first(t: (Int, String)): (Int, String) = t");
+        assert!(rust.contains("(i64, String)"));
+    }
+
+    // ── Struct construction ─────────────────────────────────────
+
+    #[test]
+    fn test_struct_lit_fields() {
+        let rust = compile("type Point = { x: Int, y: Int }\n\nfn origin(): Point = Point { x: 0, y: 0 }");
+        assert!(rust.contains("Point {"));
+        assert!(rust.contains("x: 0i64") || rust.contains("x:"));
+    }
+
+    #[test]
+    fn test_struct_field_access_codegen() {
+        let rust = compile("type Point = { x: Int, y: Int }\n\nfn get_x(p: Point): Int = p.x");
+        assert!(rust.contains("p.x"));
+    }
+
+    // ── Trait and impl codegen ──────────────────────────────────
+
+    #[test]
+    fn test_trait_codegen() {
+        let rust = compile("trait Greet\n  fn greet(self): String\nend");
+        assert!(rust.contains("trait Greet"));
+        assert!(rust.contains("fn greet"));
+    }
+
+    #[test]
+    fn test_impl_methods() {
+        let rust = compile("type Cat = { name: String }\n\nimpl Cat\n  fn speak(self): String = self.name\nend");
+        assert!(rust.contains("impl Cat"));
+        assert!(rust.contains("fn speak"));
+    }
+
+    // ── Module codegen ──────────────────────────────────────────
+    // Note: module declarations use `module` keyword and require
+    // special lexer handling, tested via integration tests instead
+
+    // ── Async function codegen ──────────────────────────────────
+
+    #[test]
+    fn test_async_fn_emits_async() {
+        let rust = compile("async fn fetch(): String = \"data\"");
+        assert!(rust.contains("async fn fetch"));
+    }
+
+    #[test]
+    fn test_async_main_adds_tokio() {
+        let rust = compile("async fn main() = sleep_ms(100)");
+        assert!(rust.contains("tokio::main") || rust.contains("#[tokio::main]"));
+    }
+
+    // ── Pub function codegen ────────────────────────────────────
+
+    #[test]
+    fn test_pub_fn_codegen() {
+        let rust = compile("pub fn api_call(): Int = 42");
+        assert!(rust.contains("pub fn api_call"));
+    }
+
+    // ── Do block codegen ────────────────────────────────────────
+
+    #[test]
+    fn test_do_block_codegen() {
+        let rust = compile("fn main() = do\n  let x = 1\n  let y = 2\n  x + y\nend");
+        assert!(rust.contains("let x"));
+        assert!(rust.contains("let y"));
+    }
+
+    // ── Const codegen ───────────────────────────────────────────
+
+    #[test]
+    fn test_const_float() {
+        let rust = compile("let PI: Float = 3.14159");
+        assert!(rust.contains("const PI: f64 = 3.14159f64"));
+    }
+
+    #[test]
+    fn test_const_bool() {
+        let rust = compile("let DEBUG: Bool = true");
+        assert!(rust.contains("const DEBUG: bool = true"));
+    }
+
+    // ── Unsafe env operations ───────────────────────────────────
+
+    #[test]
+    fn test_env_set_unsafe() {
+        let rust = compile(r#"fn main() = env_set("KEY", "VAL")"#);
+        assert!(rust.contains("unsafe"));
+    }
+
+    #[test]
+    fn test_env_remove_unsafe() {
+        let rust = compile(r#"fn main() = env_remove("KEY")"#);
+        assert!(rust.contains("unsafe"));
+    }
+
+    // ── Clone-by-default for list ops ───────────────────────────
+
+    #[test]
+    fn test_map_clone_into_iter() {
+        let rust = compile("fn main() = map([1,2,3], fn(x) => x + 1)");
+        assert!(rust.contains(".clone()") || rust.contains("into_iter"));
+    }
+
+    // ── Result/Option builtins clone before consume ─────────────
+
+    #[test]
+    fn test_expect_takes_ref() {
+        let rust = compile(r#"fn main() = expect(some(1), "fail")"#);
+        assert!(rust.contains("&"));
+    }
+
+    // ── Index access codegen ────────────────────────────────────
+
+    #[test]
+    fn test_index_usize_cast() {
+        let rust = compile("fn get(xs: List<Int>, i: Int): Int = xs[i]");
+        assert!(rust.contains("as usize"));
+    }
+
+    // ── Derive attributes on types ──────────────────────────────
+
+    #[test]
+    fn test_enum_has_derive_debug_clone() {
+        let rust = compile("type Dir =\n  | North\n  | South");
+        assert!(rust.contains("Debug"));
+        assert!(rust.contains("Clone"));
+    }
+
+    #[test]
+    fn test_struct_has_derive_debug_clone() {
+        let rust = compile("type Vec2 = { x: Float, y: Float }");
+        assert!(rust.contains("Debug"));
+        assert!(rust.contains("Clone"));
+    }
+
+    // ── Pipe desugars to nested calls ───────────────────────────
+
+    #[test]
+    fn test_pipe_chain_desugars() {
+        let rust = compile("fn double(x: Int): Int = x * 2\nfn inc(x: Int): Int = x + 1\nfn main() = 5 |> double |> inc");
+        assert!(rust.contains("inc(double(5i64))"));
+    }
+
+    // ── Method call codegen ─────────────────────────────────────
+
+    #[test]
+    fn test_method_call_codegen() {
+        let rust = compile("type Foo = { x: Int }\n\nimpl Foo\n  fn get_x(self): Int = self.x\nend\n\nfn main() = do\n  let f = Foo { x: 42 }\n  f.get_x()\nend");
+        assert!(rust.contains(".get_x()"));
+    }
+
+    // ── Lambda with type annotations ────────────────────────────
+
+    #[test]
+    fn test_lambda_typed_param_codegen() {
+        let rust = compile("fn main() = fn(x: Int) => x + 1");
+        assert!(rust.contains("|x: i64|"));
+    }
+
+    // ── Multi-param lambda ──────────────────────────────────────
+
+    #[test]
+    fn test_multi_param_lambda() {
+        let rust = compile("fn main() = fn(a, b) => a + b");
+        assert!(rust.contains("|a, b|"));
+    }
+
+    // ── Empty struct codegen ────────────────────────────────────
+
+    #[test]
+    fn test_empty_struct() {
+        let rust = compile("type Unit = {}");
+        assert!(rust.contains("struct Unit"));
+    }
+
+    // ── Try operator codegen ────────────────────────────────────
+
+    #[test]
+    fn test_try_question_mark_codegen() {
+        let rust = compile(r#"fn read(): Result<String, String> = do
+  let content = read_file("test.txt")?
+  content
+end"#);
+        assert!(rust.contains("?"));
+    }
+
+    // ── Rust block passthrough ──────────────────────────────────
+    // Note: rust blocks require special lexer handling that captures
+    // raw content between braces, tested via integration tests instead
+
+    // ── star_display wraps in parens ────────────────────────────
+
+    #[test]
+    fn test_println_wraps_star_display() {
+        let rust = compile("fn main() = println(1 + 2)");
+        assert!(rust.contains("star_display(&("));
+    }
+
+    // ── Move lambda codegen ─────────────────────────────────────
+
+    #[test]
+    fn test_move_lambda_codegen() {
+        let rust = compile("fn main() = do\n  let x = 42\n  spawn(move fn() => println(x))\nend");
+        assert!(rust.contains("move ||") || rust.contains("move |"));
     }
 }

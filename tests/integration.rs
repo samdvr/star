@@ -955,3 +955,463 @@ fn test_wildcard_pattern() {
     assert!(success);
     assert!(stdout.contains("_ =>"));
 }
+
+// ── Type system: return type mismatch detected ──────────────
+
+#[test]
+fn test_return_type_mismatch_error() {
+    let src = r#"fn wrong(x: Int): String = x"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: Int returned where String expected");
+    assert!(stderr.contains("type") || stderr.contains("mismatch") || stderr.contains("expected"),
+        "Error should mention type mismatch: {stderr}");
+}
+
+#[test]
+fn test_unknown_identifier_error() {
+    let src = r#"fn main() = nonexistent_function(42)"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: unknown function");
+    assert!(stderr.contains("Unknown") || stderr.contains("unknown"),
+        "Error should mention unknown identifier: {stderr}");
+}
+
+#[test]
+fn test_did_you_mean_suggestion() {
+    let src = r#"fn main() = prinln("hello")"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: misspelled builtin");
+    assert!(stderr.contains("println"), "Should suggest 'println': {stderr}");
+}
+
+// ── Type system: arg type mismatch ──────────────────────────
+
+#[test]
+fn test_arg_type_mismatch() {
+    let src = r#"fn greet(name: String): String = name
+fn main() = greet(42)"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: Int arg where String expected");
+    assert!(!stderr.is_empty());
+}
+
+#[test]
+fn test_arg_count_mismatch() {
+    let src = r#"fn add(a: Int, b: Int): Int = a + b
+fn main() = add(1)"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: wrong number of arguments");
+    assert!(!stderr.is_empty());
+}
+
+// ── Type system: if branch mismatch ─────────────────────────
+
+#[test]
+fn test_if_branch_type_mismatch() {
+    let src = r#"fn bad(x: Bool): Int = if x then 1 else "oops" end"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: then=Int, else=String");
+    assert!(!stderr.is_empty());
+}
+
+// ── Type system: list element mismatch ──────────────────────
+
+#[test]
+fn test_list_element_type_mismatch() {
+    let src = r#"fn main() = [1, "two", 3]"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: mixed list element types");
+    assert!(!stderr.is_empty());
+}
+
+// ── Type system: struct missing field ───────────────────────
+
+#[test]
+fn test_struct_missing_field_error() {
+    let src = r#"type Point = { x: Int, y: Int }
+fn main() = Point { x: 1 }"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: missing field y");
+    assert!(!stderr.is_empty());
+}
+
+#[test]
+fn test_struct_wrong_field_type_error() {
+    let src = r#"type Point = { x: Int, y: Int }
+fn main() = Point { x: 1, y: "two" }"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: String where Int expected");
+    assert!(!stderr.is_empty());
+}
+
+// ── Type system: enum constructor arity ─────────────────────
+
+#[test]
+fn test_enum_constructor_wrong_arity() {
+    let src = r#"type Wrapper =
+  | Wrap(Int)
+
+fn main() = Wrap(1, 2)"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: Wrap takes 1 arg, got 2");
+    assert!(!stderr.is_empty());
+}
+
+// ── Type system: match arm mismatch ─────────────────────────
+
+#[test]
+fn test_match_arm_type_mismatch() {
+    let src = r#"fn bad(x: Int) = match x
+  | 0 => "zero"
+  | _ => 42
+  end"#;
+    let (success, _stdout, stderr) = emit_rust(src);
+    assert!(!success, "Should fail: arm returns String vs Int");
+    assert!(!stderr.is_empty());
+}
+
+// ── Type system: const type mismatch ────────────────────────
+
+#[test]
+fn test_const_with_type_annotation() {
+    let src = r#"let X: Int = 42"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success, "Const with matching type should compile");
+    assert!(stdout.contains("const X: i64 = 42i64"));
+}
+
+// ── Correct programs compile without errors ─────────────────
+
+#[test]
+fn test_recursive_type_auto_boxing() {
+    let src = r#"type Tree =
+  | Leaf(Int)
+  | Node(Tree, Tree)
+
+fn sum(t: Tree): Int = match t
+  | Leaf(n) => n
+  | Node(l, r) => sum(l) + sum(r)
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Box<Tree>"));
+}
+
+#[test]
+fn test_generic_enum_compiles() {
+    let src = r#"type Maybe<T> =
+  | Just(T)
+  | Nothing
+
+fn unwrap_or<T>(m: Maybe<T>, default: T): T = match m
+  | Just(x) => x
+  | Nothing => default
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Maybe<T>") || stdout.contains("enum Maybe"));
+}
+
+#[test]
+fn test_trait_impl_compiles() {
+    let src = r#"type Dog = { name: String }
+
+trait Speak
+  fn speak(self): String
+end
+
+impl Speak for Dog
+  fn speak(self): String = "Woof!"
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("impl Speak for Dog"));
+}
+
+#[test]
+fn test_nested_match_compiles() {
+    let src = r#"type Expr =
+  | Num(Int)
+  | Add(Expr, Expr)
+
+fn eval(e: Expr): Int = match e
+  | Num(n) => n
+  | Add(a, b) => eval(a) + eval(b)
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Box<Expr>"));
+    assert!(stdout.contains("fn eval"));
+}
+
+#[test]
+fn test_higher_order_function() {
+    let src = r#"fn apply(f: fn(Int) -> Int, x: Int): Int = f(x)
+fn double(x: Int): Int = x * 2
+fn main() = println(apply(double, 21))"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("impl Fn(i64) -> i64") || stdout.contains("Fn(i64)"));
+}
+
+#[test]
+fn test_string_interpolation_complex() {
+    let src = r#"fn greet(name: String, age: Int): String = "Hello #{name}, you are #{age} years old""#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("format!"));
+}
+
+#[test]
+fn test_for_loop_with_break() {
+    let src = r#"fn find_first_even(xs: List<Int>): Int = do
+  let mut result = 0
+  for x in xs do
+    if x % 2 == 0 then do
+      result = x
+      break
+    end end
+  end
+  result
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("break"));
+    assert!(stdout.contains("for x in"));
+}
+
+#[test]
+fn test_while_with_compound_assign() {
+    let src = r#"fn countdown(n: Int): Int = do
+  let mut x = n
+  let mut sum = 0
+  while x > 0 do
+    sum += x
+    x -= 1
+  end
+  sum
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("+="));
+    assert!(stdout.contains("-="));
+}
+
+#[test]
+fn test_generic_swap_function() {
+    let src = r#"fn first<A, B>(a: A, b: B): A = a"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("<A, B>"));
+}
+
+#[test]
+fn test_list_of_tuples_typed() {
+    let src = r#"fn pairs(): List<(Int, String)> = [(1, "one"), (2, "two")]"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Vec<(i64, String)>"));
+}
+
+#[test]
+fn test_result_type_return() {
+    let src = r#"fn safe_div(a: Int, b: Int): Result<Int, String> =
+  if b == 0 then err("division by zero") else ok(a / b) end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Result<i64, String>"));
+}
+
+#[test]
+fn test_chained_method_calls() {
+    let src = r#"type Builder = { val: Int }
+
+impl Builder
+  fn set(self, v: Int): Builder = Builder { val: v }
+  fn get(self): Int = self.val
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("impl Builder"));
+}
+
+#[test]
+fn test_module_with_pub_fn() {
+    let src = r#"module Math
+  pub fn square(x: Int): Int = x * x
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("pub fn square"));
+}
+
+#[test]
+fn test_async_function_compiles() {
+    let src = r#"async fn fetch_data(): String = "data""#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("async fn fetch_data"));
+}
+
+#[test]
+fn test_lambda_in_let_binding() {
+    let src = r#"fn main() = do
+  let double = fn(x: Int) => x * 2
+  println(double(21))
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("|x: i64|"));
+}
+
+#[test]
+fn test_nested_if_expression() {
+    let src = r#"fn classify(x: Int): String =
+  if x > 0 then
+    if x > 100 then "big" else "small" end
+  else
+    "negative"
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("if") && stdout.contains("else"));
+}
+
+#[test]
+fn test_pattern_destructuring() {
+    let src = r#"fn sum_pair(p: (Int, Int)): Int = do
+  let (a, b) = p
+  a + b
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("let (a, b)"));
+}
+
+#[test]
+fn test_empty_list_compiles() {
+    let src = r#"fn empty(): List<Int> = []"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("vec![]"));
+}
+
+#[test]
+fn test_const_declarations() {
+    let src = r#"let X: Int = 10
+let Y: Int = 20
+let NAME = "star""#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("const X: i64 = 10i64"));
+    assert!(stdout.contains("const Y: i64 = 20i64"));
+    assert!(stdout.contains("const NAME"));
+}
+
+#[test]
+fn test_enum_shape_variants() {
+    let src = r#"type Shape =
+  | Circle(Float)
+  | Rect(Float, Float)
+  | Point"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Circle(f64)"));
+    assert!(stdout.contains("Rect(f64, f64)"));
+    assert!(stdout.contains("Point,"));
+}
+
+#[test]
+fn test_do_block_with_let_mut() {
+    let src = r#"fn counter(): Int = do
+  let mut count = 0
+  count += 1
+  count += 1
+  count += 1
+  count
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("let mut count"));
+    assert!(stdout.contains("count += 1"));
+}
+
+#[test]
+fn test_index_access_compiles() {
+    let src = r#"fn first(xs: List<Int>): Int = xs[0]"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("as usize"));
+}
+
+#[test]
+fn test_type_bounds_multiple() {
+    let src = r#"fn show<T: Debug + Clone>(x: T): T = x"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Debug") && stdout.contains("Clone"));
+}
+
+#[test]
+fn test_dyn_trait_param() {
+    let src = r#"trait Drawable
+  fn draw(self): String
+end
+
+fn render(obj: dyn Drawable): String = obj.draw()"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Box<dyn Drawable>"));
+}
+
+#[test]
+fn test_trait_default_method_body() {
+    let src = r#"trait Greet
+  fn name(self): String
+  fn greet(self): String = "Hello!"
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("trait Greet"));
+    assert!(stdout.contains("fn greet"));
+}
+
+#[test]
+fn test_map_collection_operations() {
+    let src = r#"fn main() = do
+  let m = map_new()
+  let m2 = map_insert(m, "a", 1)
+  let v = map_get(m2, "a")
+  println(v)
+end"#;
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_set_collection_operations() {
+    let src = r#"fn main() = do
+  let s = set_new()
+  let s2 = set_insert(s, 1)
+  let s3 = set_insert(s2, 2)
+  println(set_len(s3))
+end"#;
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_pipe_with_multi_arg_builtin() {
+    let src = r#"fn main() = [3, 1, 2] |> sort |> join(", ")"#;
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_annotations_passthrough() {
+    let src = r#"@[cfg(test)]
+fn test_helper(): Int = 42"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("#[cfg(test)]"));
+}

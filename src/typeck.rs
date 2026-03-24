@@ -3515,4 +3515,756 @@ mod tests {
         assert!(infer.unify(&Type::Unit, &Type::Unit));
         assert!(!infer.unify(&Type::Unit, &Type::Int));
     }
+
+    // ── Unification: transitive variable chains ─────────────────
+
+    #[test]
+    fn test_unify_transitive_vars() {
+        // a ~ b, b ~ Int  →  a resolves to Int
+        let mut infer = Infer::new();
+        let a = infer.fresh_var();
+        let b = infer.fresh_var();
+        assert!(infer.unify(&a, &b));
+        assert!(infer.unify(&b, &Type::Int));
+        assert_eq!(infer.apply(&a), Type::Int);
+        assert_eq!(infer.apply(&b), Type::Int);
+    }
+
+    #[test]
+    fn test_unify_var_both_directions() {
+        // Int ~ a  should work the same as a ~ Int
+        let mut infer = Infer::new();
+        let a = infer.fresh_var();
+        assert!(infer.unify(&Type::Str, &a));
+        assert_eq!(infer.apply(&a), Type::Str);
+    }
+
+    #[test]
+    fn test_unify_function_types_same() {
+        let mut infer = Infer::new();
+        let f1 = Type::Function(vec![Type::Int], Box::new(Type::Bool));
+        let f2 = Type::Function(vec![Type::Int], Box::new(Type::Bool));
+        assert!(infer.unify(&f1, &f2));
+    }
+
+    #[test]
+    fn test_unify_function_types_return_mismatch() {
+        let mut infer = Infer::new();
+        let f1 = Type::Function(vec![Type::Int], Box::new(Type::Bool));
+        let f2 = Type::Function(vec![Type::Int], Box::new(Type::Str));
+        assert!(!infer.unify(&f1, &f2));
+    }
+
+    #[test]
+    fn test_unify_function_types_arity_mismatch() {
+        let mut infer = Infer::new();
+        let f1 = Type::Function(vec![Type::Int], Box::new(Type::Bool));
+        let f2 = Type::Function(vec![Type::Int, Type::Int], Box::new(Type::Bool));
+        assert!(!infer.unify(&f1, &f2));
+    }
+
+    #[test]
+    fn test_unify_function_with_vars() {
+        // fn(a) -> b  ~  fn(Int) -> Bool  →  a=Int, b=Bool
+        let mut infer = Infer::new();
+        let a = infer.fresh_var();
+        let b = infer.fresh_var();
+        let f1 = Type::Function(vec![a.clone()], Box::new(b.clone()));
+        let f2 = Type::Function(vec![Type::Int], Box::new(Type::Bool));
+        assert!(infer.unify(&f1, &f2));
+        assert_eq!(infer.apply(&a), Type::Int);
+        assert_eq!(infer.apply(&b), Type::Bool);
+    }
+
+    #[test]
+    fn test_unify_tuple_types_equal() {
+        let mut infer = Infer::new();
+        let t1 = Type::Tuple(vec![Type::Int, Type::Str]);
+        let t2 = Type::Tuple(vec![Type::Int, Type::Str]);
+        assert!(infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_unify_tuple_length_differs() {
+        let mut infer = Infer::new();
+        let t1 = Type::Tuple(vec![Type::Int]);
+        let t2 = Type::Tuple(vec![Type::Int, Type::Str]);
+        assert!(!infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_unify_tuple_element_mismatch() {
+        let mut infer = Infer::new();
+        let t1 = Type::Tuple(vec![Type::Int, Type::Str]);
+        let t2 = Type::Tuple(vec![Type::Int, Type::Bool]);
+        assert!(!infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_unify_nested_list() {
+        // List<List<a>>  ~  List<List<Int>>
+        let mut infer = Infer::new();
+        let a = infer.fresh_var();
+        let t1 = Type::List(Box::new(Type::List(Box::new(a.clone()))));
+        let t2 = Type::List(Box::new(Type::List(Box::new(Type::Int))));
+        assert!(infer.unify(&t1, &t2));
+        assert_eq!(infer.apply(&a), Type::Int);
+    }
+
+    #[test]
+    fn test_unify_named_type_param_count_mismatch() {
+        let mut infer = Infer::new();
+        let t1 = Type::Named("Result".to_string(), vec![Type::Int]);
+        let t2 = Type::Named("Result".to_string(), vec![Type::Int, Type::Str]);
+        assert!(!infer.unify(&t1, &t2));
+    }
+
+    // ── Error type absorbs mismatches ───────────────────────────
+
+    #[test]
+    fn test_error_unifies_with_function() {
+        let mut infer = Infer::new();
+        let f = Type::Function(vec![Type::Int], Box::new(Type::Str));
+        assert!(infer.unify(&Type::Error, &f));
+    }
+
+    #[test]
+    fn test_error_unifies_with_list() {
+        let mut infer = Infer::new();
+        assert!(infer.unify(&Type::Error, &Type::List(Box::new(Type::Int))));
+    }
+
+    #[test]
+    fn test_error_unifies_with_tuple() {
+        let mut infer = Infer::new();
+        assert!(infer.unify(&Type::Error, &Type::Tuple(vec![Type::Int, Type::Str])));
+    }
+
+    // ── Let-polymorphism: multiple instantiations ───────────────
+
+    #[test]
+    fn test_let_polymorphism_pair() {
+        // A polymorphic function fn(x) => (x, x) should instantiate differently
+        let mut infer = Infer::new();
+        let lambda = mk_expr(ExprKind::Lambda(
+            vec![mk_param("x", None)],
+            None,
+            Box::new(mk_expr(ExprKind::Tuple(vec![
+                mk_expr(ExprKind::Ident("x".to_string())),
+                mk_expr(ExprKind::Ident("x".to_string())),
+            ]))),
+            false,
+        ));
+        let ty = infer.infer_expr(&lambda);
+        let scheme = infer.generalize(&ty);
+        // Instantiate and use with Int
+        let inst = infer.instantiate(&scheme);
+        assert!(infer.unify(
+            &inst,
+            &Type::Function(vec![Type::Int], Box::new(Type::Tuple(vec![Type::Int, Type::Int])))
+        ));
+        // Instantiate again and use with Str
+        let inst2 = infer.instantiate(&scheme);
+        assert!(infer.unify(
+            &inst2,
+            &Type::Function(vec![Type::Str], Box::new(Type::Tuple(vec![Type::Str, Type::Str])))
+        ));
+        assert!(infer.errors.is_empty());
+    }
+
+    // ── Scope isolation ─────────────────────────────────────────
+
+    #[test]
+    fn test_scope_isolation() {
+        let mut infer = Infer::new();
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("x".to_string()), &Type::Int);
+        assert_eq!(infer.lookup_var("x"), Some(Type::Int));
+        infer.pop_scope();
+        // After popping, x should not be visible
+        assert!(infer.lookup_var("x").is_none());
+    }
+
+    #[test]
+    fn test_nested_scopes() {
+        let mut infer = Infer::new();
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("x".to_string()), &Type::Int);
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("y".to_string()), &Type::Str);
+        assert_eq!(infer.lookup_var("x"), Some(Type::Int));
+        assert_eq!(infer.lookup_var("y"), Some(Type::Str));
+        infer.pop_scope();
+        assert_eq!(infer.lookup_var("x"), Some(Type::Int));
+        assert!(infer.lookup_var("y").is_none());
+        infer.pop_scope();
+    }
+
+    #[test]
+    fn test_inner_scope_shadows_outer() {
+        let mut infer = Infer::new();
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("x".to_string()), &Type::Int);
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("x".to_string()), &Type::Str);
+        assert_eq!(infer.lookup_var("x"), Some(Type::Str));
+        infer.pop_scope();
+        assert_eq!(infer.lookup_var("x"), Some(Type::Int));
+        infer.pop_scope();
+    }
+
+    // ── Multi-function programs ─────────────────────────────────
+
+    #[test]
+    fn test_function_calls_another() {
+        let double = mk_fn(
+            "double",
+            vec![mk_param("x", Some(int_ty()))],
+            Some(int_ty()),
+            mk_expr(ExprKind::BinOp(
+                Box::new(mk_expr(ExprKind::Ident("x".to_string()))),
+                BinOp::Mul,
+                Box::new(mk_expr(ExprKind::IntLit(2))),
+            )),
+        );
+        let main_fn = mk_fn(
+            "main",
+            vec![],
+            Some(int_ty()),
+            mk_expr(ExprKind::Call(
+                Box::new(mk_expr(ExprKind::Ident("double".to_string()))),
+                vec![mk_expr(ExprKind::IntLit(5))],
+            )),
+        );
+        let program = Program {
+            items: vec![Item::Function(double), Item::Function(main_fn)],
+        };
+        let result = check(program);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_function_wrong_arg_type() {
+        let greet = mk_fn(
+            "greet",
+            vec![mk_param("name", Some(str_ty()))],
+            Some(str_ty()),
+            mk_expr(ExprKind::Ident("name".to_string())),
+        );
+        let main_fn = mk_fn(
+            "main",
+            vec![],
+            Some(str_ty()),
+            mk_expr(ExprKind::Call(
+                Box::new(mk_expr(ExprKind::Ident("greet".to_string()))),
+                vec![mk_expr(ExprKind::IntLit(42))],  // Int where String expected
+            )),
+        );
+        let program = Program {
+            items: vec![Item::Function(greet), Item::Function(main_fn)],
+        };
+        let result = check(program);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_function_wrong_arg_count() {
+        let add = mk_fn(
+            "add",
+            vec![mk_param("a", Some(int_ty())), mk_param("b", Some(int_ty()))],
+            Some(int_ty()),
+            mk_expr(ExprKind::BinOp(
+                Box::new(mk_expr(ExprKind::Ident("a".to_string()))),
+                BinOp::Add,
+                Box::new(mk_expr(ExprKind::Ident("b".to_string()))),
+            )),
+        );
+        let main_fn = mk_fn(
+            "main",
+            vec![],
+            Some(int_ty()),
+            mk_expr(ExprKind::Call(
+                Box::new(mk_expr(ExprKind::Ident("add".to_string()))),
+                vec![mk_expr(ExprKind::IntLit(1))],  // 1 arg instead of 2
+            )),
+        );
+        let program = Program {
+            items: vec![Item::Function(add), Item::Function(main_fn)],
+        };
+        let result = check(program);
+        assert!(result.is_err());
+    }
+
+    // ── Match expression type inference ─────────────────────────
+
+    #[test]
+    fn test_match_all_arms_same_type() {
+        let mut infer = Infer::new();
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("x".to_string()), &Type::Int);
+        let expr = mk_expr(ExprKind::Match(
+            Box::new(mk_expr(ExprKind::Ident("x".to_string()))),
+            vec![
+                MatchArm {
+                    pattern: Pattern::IntLit(0),
+                    body: mk_expr(ExprKind::StringLit("zero".to_string())),
+                    guard: None,
+                    span: span(),
+                },
+                MatchArm {
+                    pattern: Pattern::Wildcard,
+                    body: mk_expr(ExprKind::StringLit("other".to_string())),
+                    guard: None,
+                    span: span(),
+                },
+            ],
+        ));
+        let ty = infer.infer_expr(&expr);
+        assert_eq!(ty, Type::Str);
+        assert!(infer.errors.is_empty());
+        infer.pop_scope();
+    }
+
+    #[test]
+    fn test_match_arm_type_mismatch() {
+        let mut infer = Infer::new();
+        infer.push_scope();
+        infer.infer_pattern(&Pattern::Ident("x".to_string()), &Type::Int);
+        let expr = mk_expr(ExprKind::Match(
+            Box::new(mk_expr(ExprKind::Ident("x".to_string()))),
+            vec![
+                MatchArm {
+                    pattern: Pattern::IntLit(0),
+                    body: mk_expr(ExprKind::StringLit("zero".to_string())),
+                    guard: None,
+                    span: span(),
+                },
+                MatchArm {
+                    pattern: Pattern::Wildcard,
+                    body: mk_expr(ExprKind::IntLit(1)),  // Int vs String
+                    guard: None,
+                    span: span(),
+                },
+            ],
+        ));
+        infer.infer_expr(&expr);
+        assert!(!infer.errors.is_empty());
+        infer.pop_scope();
+    }
+
+    // ── Struct field type checking ──────────────────────────────
+
+    #[test]
+    fn test_struct_wrong_field_type() {
+        let td = TypeDecl {
+            name: "Pair".to_string(),
+            type_params: vec![],
+            body: TypeBody::Struct(vec![
+                Field { name: "a".to_string(), ty: int_ty(), span: span() },
+                Field { name: "b".to_string(), ty: str_ty(), span: span() },
+            ]),
+            span: span(),
+        };
+        let expr = mk_expr(ExprKind::StructLit(
+            "Pair".to_string(),
+            vec![
+                ("a".to_string(), mk_expr(ExprKind::IntLit(1))),
+                ("b".to_string(), mk_expr(ExprKind::IntLit(2))),  // Int where String expected
+            ],
+            None,
+        ));
+        let program = Program {
+            items: vec![Item::TypeDecl(td), Item::Expr(expr)],
+        };
+        let result = check(program);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_struct_extra_field() {
+        let td = TypeDecl {
+            name: "Single".to_string(),
+            type_params: vec![],
+            body: TypeBody::Struct(vec![
+                Field { name: "x".to_string(), ty: int_ty(), span: span() },
+            ]),
+            span: span(),
+        };
+        let expr = mk_expr(ExprKind::StructLit(
+            "Single".to_string(),
+            vec![
+                ("x".to_string(), mk_expr(ExprKind::IntLit(1))),
+                ("y".to_string(), mk_expr(ExprKind::IntLit(2))),  // extra field
+            ],
+            None,
+        ));
+        let program = Program {
+            items: vec![Item::TypeDecl(td), Item::Expr(expr)],
+        };
+        let result = check(program);
+        assert!(result.is_err());
+    }
+
+    // ── If without else returns unit ────────────────────────────
+
+    #[test]
+    fn test_if_no_else_returns_unit() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::If(
+            Box::new(mk_expr(ExprKind::BoolLit(true))),
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            None,
+        ));
+        let ty = infer.infer_expr(&expr);
+        assert_eq!(ty, Type::Unit);
+    }
+
+    // ── Levenshtein "did you mean?" suggestions ─────────────────
+
+    #[test]
+    fn test_did_you_mean_suggestion() {
+        // Misspelling "println" as "prinln" should produce a suggestion
+        let f = mk_fn(
+            "main",
+            vec![],
+            None,
+            mk_expr(ExprKind::Call(
+                Box::new(mk_expr(ExprKind::Ident("prinln".to_string()))),
+                vec![mk_expr(ExprKind::StringLit("hi".to_string()))],
+            )),
+        );
+        let program = Program {
+            items: vec![Item::Function(f)],
+        };
+        let result = check(program);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("println"), "Should suggest 'println', got: {err}");
+    }
+
+    // ── Tuple pattern with wrong arity ──────────────────────────
+
+    #[test]
+    fn test_tuple_pattern_correct_arity() {
+        let mut infer = Infer::new();
+        infer.push_scope();
+        let scrut_ty = Type::Tuple(vec![Type::Int, Type::Str]);
+        infer.infer_pattern(
+            &Pattern::Tuple(vec![
+                Pattern::Ident("a".to_string()),
+                Pattern::Ident("b".to_string()),
+            ]),
+            &scrut_ty,
+        );
+        assert_eq!(infer.lookup_var("a"), Some(Type::Int));
+        assert_eq!(infer.lookup_var("b"), Some(Type::Str));
+        assert!(infer.errors.is_empty());
+        infer.pop_scope();
+    }
+
+    // ── Constructor pattern binds variables ──────────────────────
+
+    #[test]
+    fn test_constructor_pattern_binds() {
+        let td = TypeDecl {
+            name: "Wrapper".to_string(),
+            type_params: vec![],
+            body: TypeBody::Enum(vec![
+                Variant {
+                    name: "Wrap".to_string(),
+                    fields: vec![TypeExpr::Named("Int".to_string(), vec![])],
+                    span: span(),
+                },
+            ]),
+            span: span(),
+        };
+        let f = mk_fn(
+            "unwrap",
+            vec![mk_param("w", Some(TypeExpr::Named("Wrapper".to_string(), vec![])))],
+            Some(int_ty()),
+            mk_expr(ExprKind::Match(
+                Box::new(mk_expr(ExprKind::Ident("w".to_string()))),
+                vec![MatchArm {
+                    pattern: Pattern::Constructor("Wrap".to_string(), vec![Pattern::Ident("x".to_string())]),
+                    body: mk_expr(ExprKind::Ident("x".to_string())),
+                    guard: None,
+                    span: span(),
+                }],
+            )),
+        );
+        let program = Program {
+            items: vec![Item::TypeDecl(td), Item::Function(f)],
+        };
+        let result = check(program);
+        assert!(result.is_ok());
+    }
+
+    // ── Bitwise operators return Int ────────────────────────────
+
+    #[test]
+    fn test_bitwise_and_returns_int() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(0xFF))),
+            BinOp::Band,
+            Box::new(mk_expr(ExprKind::IntLit(0x0F))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Int);
+    }
+
+    #[test]
+    fn test_bitwise_or_returns_int() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(0xA0))),
+            BinOp::Bor,
+            Box::new(mk_expr(ExprKind::IntLit(0x05))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Int);
+    }
+
+    #[test]
+    fn test_bitwise_xor_returns_int() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(0xFF))),
+            BinOp::Bxor,
+            Box::new(mk_expr(ExprKind::IntLit(0x0F))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Int);
+    }
+
+    #[test]
+    fn test_shift_left_returns_int() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            BinOp::Shl,
+            Box::new(mk_expr(ExprKind::IntLit(4))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Int);
+    }
+
+    #[test]
+    fn test_shift_right_returns_int() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(16))),
+            BinOp::Shr,
+            Box::new(mk_expr(ExprKind::IntLit(2))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Int);
+    }
+
+    // ── Float arithmetic ────────────────────────────────────────
+
+    #[test]
+    fn test_float_mul() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::FloatLit(2.5))),
+            BinOp::Mul,
+            Box::new(mk_expr(ExprKind::FloatLit(4.0))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Float);
+    }
+
+    #[test]
+    fn test_float_div() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::FloatLit(10.0))),
+            BinOp::Div,
+            Box::new(mk_expr(ExprKind::FloatLit(3.0))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Float);
+    }
+
+    #[test]
+    fn test_float_comparison_returns_bool() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::FloatLit(1.5))),
+            BinOp::Le,
+            Box::new(mk_expr(ExprKind::FloatLit(2.5))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Bool);
+    }
+
+    // ── Negate float ────────────────────────────────────────────
+
+    #[test]
+    fn test_unary_neg_float() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::UnaryOp(
+            UnaryOp::Neg,
+            Box::new(mk_expr(ExprKind::FloatLit(3.14))),
+        ));
+        assert_eq!(infer.infer_expr(&expr), Type::Float);
+    }
+
+    // ── Empty list ──────────────────────────────────────────────
+
+    #[test]
+    fn test_empty_list_infers_var() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::ListLit(vec![]));
+        let ty = infer.infer_expr(&expr);
+        match infer.apply(&ty) {
+            Type::List(_) => {} // Good — List<somevar>
+            other => panic!("Expected List type, got {:?}", other),
+        }
+    }
+
+    // ── String interpolation ────────────────────────────────────
+
+    #[test]
+    fn test_string_interp_returns_string() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::StringInterp(vec![
+            StringPart::Lit("x is ".to_string()),
+            StringPart::Expr(mk_expr(ExprKind::IntLit(42))),
+        ]));
+        let ty = infer.infer_expr(&expr);
+        assert_eq!(ty, Type::Str);
+    }
+
+    // ── Try expression ──────────────────────────────────────────
+
+    #[test]
+    fn test_try_expr_infers() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::Try(
+            Box::new(mk_expr(ExprKind::IntLit(42))),
+        ));
+        // Try should produce some type (not crash)
+        let _ty = infer.infer_expr(&expr);
+    }
+
+    // ── Break and Continue ──────────────────────────────────────
+
+    #[test]
+    fn test_break_is_unit() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::Break);
+        let ty = infer.infer_expr(&expr);
+        assert_eq!(ty, Type::Unit);
+    }
+
+    #[test]
+    fn test_continue_is_unit() {
+        let mut infer = Infer::new();
+        let expr = mk_expr(ExprKind::Continue);
+        let ty = infer.infer_expr(&expr);
+        assert_eq!(ty, Type::Unit);
+    }
+
+    // ── Trait declarations type check ───────────────────────────
+
+    #[test]
+    fn test_trait_and_impl_ok() {
+        let program = Program {
+            items: vec![
+                Item::TypeDecl(TypeDecl {
+                    name: "Dog".to_string(),
+                    type_params: vec![],
+                    body: TypeBody::Struct(vec![
+                        Field { name: "name".to_string(), ty: str_ty(), span: span() },
+                    ]),
+                    span: span(),
+                }),
+                Item::TraitDecl(TraitDecl {
+                    name: "Speak".to_string(),
+                    type_params: vec![],
+                    methods: vec![TraitMethod {
+                        name: "speak".to_string(),
+                        params: vec![mk_param("self", None)],
+                        return_type: Some(str_ty()),
+                        default_body: None,
+                        span: span(),
+                    }],
+                    associated_types: vec![],
+                    span: span(),
+                }),
+                Item::ImplBlock(ImplBlock {
+                    type_name: "Dog".to_string(),
+                    trait_name: Some("Speak".to_string()),
+                    type_params: vec![],
+                    methods: vec![Function {
+                        name: "speak".to_string(),
+                        params: vec![mk_param("self", None)],
+                        return_type: Some(str_ty()),
+                        body: mk_expr(ExprKind::StringLit("Woof!".to_string())),
+                        is_pub: false,
+                        is_async: false,
+                        type_params: vec![],
+                        annotations: vec![],
+                        span: span(),
+                    }],
+                    associated_types: vec![],
+                    span: span(),
+                }),
+            ],
+        };
+        let result = check(program);
+        assert!(result.is_ok());
+    }
+
+    // ── Multiple enum variants type check ───────────────────────
+
+    #[test]
+    fn test_enum_multiple_variant_constructors() {
+        let td = TypeDecl {
+            name: "Shape".to_string(),
+            type_params: vec![],
+            body: TypeBody::Enum(vec![
+                Variant { name: "Circle".to_string(), fields: vec![TypeExpr::Named("Float".to_string(), vec![])], span: span() },
+                Variant { name: "Rect".to_string(), fields: vec![TypeExpr::Named("Float".to_string(), vec![]), TypeExpr::Named("Float".to_string(), vec![])], span: span() },
+                Variant { name: "Point".to_string(), fields: vec![], span: span() },
+            ]),
+            span: span(),
+        };
+        // Circle(1.0) should typecheck
+        let expr1 = mk_expr(ExprKind::Call(
+            Box::new(mk_expr(ExprKind::Ident("Circle".to_string()))),
+            vec![mk_expr(ExprKind::FloatLit(5.0))],
+        ));
+        let program = Program {
+            items: vec![Item::TypeDecl(td), Item::Expr(expr1)],
+        };
+        let result = check(program);
+        assert!(result.is_ok());
+    }
+
+    // ── Const declaration type check ────────────────────────────
+
+    #[test]
+    fn test_const_type_ok() {
+        let program = Program {
+            items: vec![Item::Const(ConstDecl {
+                name: "X".to_string(),
+                ty: Some(int_ty()),
+                value: mk_expr(ExprKind::IntLit(42)),
+                is_pub: false,
+                span: span(),
+            })],
+        };
+        let result = check(program);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_const_infers_type() {
+        let program = Program {
+            items: vec![Item::Const(ConstDecl {
+                name: "Y".to_string(),
+                ty: None,
+                value: mk_expr(ExprKind::StringLit("hello".to_string())),
+                is_pub: false,
+                span: span(),
+            })],
+        };
+        let result = check(program);
+        assert!(result.is_ok());
+    }
 }
