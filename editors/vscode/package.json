@@ -1,0 +1,36 @@
+{
+  "name": "star-lang",
+  "displayName": "Star Language",
+  "description": "Language support for the Star programming language",
+  "version": "0.1.0",
+  "publisher": "star-lang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:star"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "star",
+        "aliases": ["Star", "star"],
+        "extensions": [".star"],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  }
+}

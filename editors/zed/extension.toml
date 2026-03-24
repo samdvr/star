@@ -1,0 +1,13 @@
+id = "star"
+name = "Star"
+description = "Support for the Star programming language"
+version = "0.1.0"
+schema_version = 1
+authors = ["Sam"]
+
+[language_servers.star-lsp]
+name = "Star Language Server"
+languages = ["Star"]
+
+[language_servers.star-lsp.language_ids]
+Star = "star"
