@@ -215,4 +215,124 @@ mod tests {
         let output = optimize(input);
         assert_eq!(output, "let _result = my_list.into_iter().filter(|_item| (_item.clone() > 0i64)).collect::<Vec<_>>();");
     }
+
+    // ── Additional optimizer tests ─────────────────────────────────
+
+    #[test]
+    fn test_multiple_clone_into_iter() {
+        let input = "a.clone().into_iter(); b.clone().into_iter()";
+        let output = optimize(input);
+        assert_eq!(output, "a.into_iter(); b.into_iter()");
+    }
+
+    #[test]
+    fn test_clone_into_not_into_iter() {
+        // .clone() before other methods should be preserved
+        let input = "x.clone().push(1)";
+        let output = optimize(input);
+        assert_eq!(output, "x.clone().push(1)");
+    }
+
+    #[test]
+    fn test_multiple_integer_literal_clones() {
+        let input = "vec![1i64.clone(), 2i64.clone(), 3i64.clone()]";
+        let output = optimize(input);
+        assert_eq!(output, "vec![1i64, 2i64, 3i64]");
+    }
+
+    #[test]
+    fn test_multiple_float_literal_clones() {
+        let input = "(1.5f64.clone(), 2.5f64.clone())";
+        let output = optimize(input);
+        assert_eq!(output, "(1.5f64, 2.5f64)");
+    }
+
+    #[test]
+    fn test_mixed_literal_clones() {
+        let input = "let x = 42i64.clone() + 3.14f64.clone() > 0i64.clone();";
+        let output = optimize(input);
+        assert_eq!(output, "let x = 42i64 + 3.14f64 > 0i64;");
+    }
+
+    #[test]
+    fn test_bool_clone_in_expression() {
+        let input = "if true.clone() && !false.clone() { 1 } else { 0 }";
+        let output = optimize(input);
+        assert_eq!(output, "if true && !false { 1 } else { 0 }");
+    }
+
+    #[test]
+    fn test_preserve_clone_on_variable() {
+        // Regular variable clones should be preserved
+        let input = "let y = x.clone();";
+        let output = optimize(input);
+        assert_eq!(output, "let y = x.clone();");
+    }
+
+    #[test]
+    fn test_preserve_clone_on_method_result() {
+        let input = "x.get().clone()";
+        let output = optimize(input);
+        assert_eq!(output, "x.get().clone()");
+    }
+
+    #[test]
+    fn test_triple_clone_removal() {
+        let input = "x.clone().clone().clone()";
+        let output = optimize(input);
+        // First pass: clone().clone() -> clone(), result: x.clone().clone()
+        // But optimize is single-pass, so it should handle at least one level
+        assert!(output.matches(".clone()").count() < 3);
+    }
+
+    #[test]
+    fn test_zero_literal_clone() {
+        let input = "0i64.clone()";
+        let output = optimize(input);
+        assert_eq!(output, "0i64");
+    }
+
+    #[test]
+    fn test_negative_looking_float_clone() {
+        // This is actually ")" followed by f64.clone() which should not match
+        let input = ")f64.clone()";
+        let output = optimize(input);
+        assert_eq!(output, ")f64.clone()", "Non-digit before f64 should not be optimized");
+    }
+
+    #[test]
+    fn test_to_string_clone_multiple() {
+        let input = r#"a.to_string().clone() + b.to_string().clone()"#;
+        let output = optimize(input);
+        assert_eq!(output, r#"a.to_string() + b.to_string()"#);
+    }
+
+    #[test]
+    fn test_clone_into_at_end_of_input() {
+        let input = "x.clone().into()";
+        let output = optimize(input);
+        assert_eq!(output, "x.into()");
+    }
+
+    #[test]
+    fn test_all_optimizations_combined() {
+        let input = "let result = list.clone().into_iter().map(|x| (x.clone() + 1i64.clone(), true.clone())).collect::<Vec<_>>();";
+        let output = optimize(input);
+        assert!(!output.contains("list.clone().into_iter()"), "Should remove clone before into_iter");
+        assert!(!output.contains("1i64.clone()"), "Should remove i64 literal clone");
+        assert!(!output.contains("true.clone()"), "Should remove bool literal clone");
+        assert!(output.contains("x.clone()"), "Should preserve variable clone");
+    }
+
+    #[test]
+    fn test_only_whitespace() {
+        assert_eq!(optimize("   \n\t  "), "   \n\t  ");
+    }
+
+    #[test]
+    fn test_no_mutation_when_no_patterns() {
+        let input = "fn main() { let x = 42; println!(\"{}\", x); }";
+        let output = optimize(input);
+        assert_eq!(output, input, "Should not modify code without clone patterns");
+    }
 }

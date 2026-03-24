@@ -1340,4 +1340,284 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert!(matches!(tokens[0].kind, TokenKind::Eof));
     }
+
+    // ── Additional lexer edge case tests ───────────────────────────
+
+    #[test]
+    fn test_lex_all_keywords_comprehensive() {
+        let src = "fn let type match if then else end do for in while trait impl use module pub async extern move mut break continue";
+        let tokens = lex(src).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Fn));
+        assert!(matches!(tokens[1].kind, TokenKind::Let));
+        assert!(matches!(tokens[2].kind, TokenKind::Type));
+        assert!(matches!(tokens[3].kind, TokenKind::Match));
+        assert!(matches!(tokens[4].kind, TokenKind::If));
+        assert!(matches!(tokens[5].kind, TokenKind::Then));
+        assert!(matches!(tokens[6].kind, TokenKind::Else));
+        assert!(matches!(tokens[7].kind, TokenKind::End));
+        assert!(matches!(tokens[8].kind, TokenKind::Do));
+        assert!(matches!(tokens[9].kind, TokenKind::For));
+        assert!(matches!(tokens[10].kind, TokenKind::In));
+        assert!(matches!(tokens[11].kind, TokenKind::While));
+        assert!(matches!(tokens[12].kind, TokenKind::Trait));
+        assert!(matches!(tokens[13].kind, TokenKind::Impl));
+        assert!(matches!(tokens[14].kind, TokenKind::Use));
+        assert!(matches!(tokens[15].kind, TokenKind::Module));
+        assert!(matches!(tokens[16].kind, TokenKind::Pub));
+        assert!(matches!(tokens[17].kind, TokenKind::Async));
+        assert!(matches!(tokens[18].kind, TokenKind::Extern));
+        assert!(matches!(tokens[19].kind, TokenKind::Move));
+        assert!(matches!(tokens[20].kind, TokenKind::Mut));
+        assert!(matches!(tokens[21].kind, TokenKind::Break));
+        assert!(matches!(tokens[22].kind, TokenKind::Continue));
+    }
+
+    #[test]
+    fn test_lex_all_operator_symbols() {
+        let src = "+ - * / % == != < > <= >= |>";
+        let tokens = lex(src).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Plus));
+        assert!(matches!(tokens[1].kind, TokenKind::Minus));
+        assert!(matches!(tokens[2].kind, TokenKind::Star));
+        assert!(matches!(tokens[3].kind, TokenKind::Slash));
+        assert!(matches!(tokens[4].kind, TokenKind::Percent));
+        assert!(matches!(tokens[5].kind, TokenKind::EqEq));
+        assert!(matches!(tokens[6].kind, TokenKind::Ne));
+        assert!(matches!(tokens[7].kind, TokenKind::Lt));
+        assert!(matches!(tokens[8].kind, TokenKind::Gt));
+        assert!(matches!(tokens[9].kind, TokenKind::Le));
+        assert!(matches!(tokens[10].kind, TokenKind::Ge));
+        assert!(matches!(tokens[11].kind, TokenKind::PipeArrow));
+    }
+
+    #[test]
+    fn test_lex_adjacent_strings() {
+        let src = r#""hello" "world""#;
+        let tokens = lex(src).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Str(ref s) if s == "hello"));
+        assert!(matches!(tokens[1].kind, TokenKind::Str(ref s) if s == "world"));
+    }
+
+    #[test]
+    fn test_lex_string_all_escape_sequences() {
+        let src = r#""tab\there\nnew\\slash\"quote""#;
+        let tokens = lex(src).unwrap();
+        match &tokens[0].kind {
+            TokenKind::Str(s) => {
+                assert!(s.contains('\t'));
+                assert!(s.contains('\n'));
+                assert!(s.contains('\\'));
+                assert!(s.contains('"'));
+            }
+            other => panic!("Expected Str, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lex_interpolation_produces_interp_str() {
+        let src = r#""outer #{inner}""#;
+        let tokens = lex(src).unwrap();
+        let has_interp = tokens.iter().any(|t| matches!(t.kind, TokenKind::InterpStr(_)));
+        assert!(has_interp, "Should contain InterpStr token");
+    }
+
+    #[test]
+    fn test_lex_very_large_integer() {
+        let tokens = lex("999999999999").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Int(999999999999)));
+    }
+
+    #[test]
+    fn test_lex_float_starting_with_zero() {
+        let tokens = lex("0.123").unwrap();
+        match &tokens[0].kind {
+            TokenKind::Float(f) => assert!((*f - 0.123).abs() < f64::EPSILON),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lex_multiple_line_comments() {
+        let src = "# comment 1\n# comment 2\n42";
+        let tokens = lex(src).unwrap();
+        // Comments are stored as Comment tokens but filtered in some flows
+        // At minimum the integer token should exist
+        let has_int = tokens.iter().any(|t| matches!(t.kind, TokenKind::Int(42)));
+        assert!(has_int, "Should contain integer after comments");
+    }
+
+    #[test]
+    fn test_lex_inline_comment() {
+        let src = "42 # inline comment";
+        let tokens = lex(src).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Int(42)));
+    }
+
+    #[test]
+    fn test_lex_upper_ident_types() {
+        let tokens = lex("MyType SomeEnum").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::UpperIdent(ref s) if s == "MyType"));
+        assert!(matches!(tokens[1].kind, TokenKind::UpperIdent(ref s) if s == "SomeEnum"));
+    }
+
+    #[test]
+    fn test_lex_all_punctuation() {
+        let tokens = lex("( ) [ ] { } , : .").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::LParen));
+        assert!(matches!(tokens[1].kind, TokenKind::RParen));
+        assert!(matches!(tokens[2].kind, TokenKind::LBracket));
+        assert!(matches!(tokens[3].kind, TokenKind::RBracket));
+        assert!(matches!(tokens[4].kind, TokenKind::LBrace));
+        assert!(matches!(tokens[5].kind, TokenKind::RBrace));
+        assert!(matches!(tokens[6].kind, TokenKind::Comma));
+        assert!(matches!(tokens[7].kind, TokenKind::Colon));
+        assert!(matches!(tokens[8].kind, TokenKind::Dot));
+    }
+
+    #[test]
+    fn test_lex_boolean_keywords() {
+        let tokens = lex("and or not").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::And));
+        assert!(matches!(tokens[1].kind, TokenKind::Or));
+        assert!(matches!(tokens[2].kind, TokenKind::Not));
+    }
+
+    #[test]
+    fn test_lex_repeated_operators() {
+        let tokens = lex("++--").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Plus));
+        assert!(matches!(tokens[1].kind, TokenKind::Plus));
+        assert!(matches!(tokens[2].kind, TokenKind::Minus));
+        assert!(matches!(tokens[3].kind, TokenKind::Minus));
+    }
+
+    #[test]
+    fn test_lex_bitwise_keyword_tokens() {
+        let tokens = lex("band bor bxor").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Band));
+        assert!(matches!(tokens[1].kind, TokenKind::Bor));
+        assert!(matches!(tokens[2].kind, TokenKind::Bxor));
+    }
+
+    #[test]
+    fn test_lex_mixed_whitespace() {
+        let tokens = lex("fn\t\tmain()\n\n\n=\r\n42").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Fn));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "main"));
+    }
+
+    #[test]
+    fn test_lex_fat_arrow_symbol() {
+        let tokens = lex("=>").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::FatArrow));
+    }
+
+    #[test]
+    fn test_lex_dotdot_symbol() {
+        let tokens = lex("..").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::DotDot));
+    }
+
+    #[test]
+    fn test_lex_triple_string_interpolation() {
+        let src = "let s = \"\"\"\n  hello #{name}\n  \"\"\"";
+        let tokens = lex(src).unwrap();
+        // Should succeed — triple strings with interpolation produce InterpStr
+        let has_interp = tokens.iter().any(|t| matches!(t.kind, TokenKind::InterpStr(_)));
+        assert!(has_interp, "Triple string should support interpolation");
+    }
+
+    #[test]
+    fn test_lex_shift_operators() {
+        let tokens = lex("<< >>").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Shl));
+        assert!(matches!(tokens[1].kind, TokenKind::Shr));
+    }
+
+    #[test]
+    fn test_lex_compound_eq_operators() {
+        let tokens = lex("+= -= *= /= %=").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::PlusEq));
+        assert!(matches!(tokens[1].kind, TokenKind::MinusEq));
+        assert!(matches!(tokens[2].kind, TokenKind::StarEq));
+        assert!(matches!(tokens[3].kind, TokenKind::SlashEq));
+        assert!(matches!(tokens[4].kind, TokenKind::PercentEq));
+    }
+
+    #[test]
+    fn test_lex_colon_colon() {
+        let tokens = lex("Foo::bar").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::UpperIdent(ref s) if s == "Foo"));
+        assert!(matches!(tokens[1].kind, TokenKind::ColonColon));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "bar"));
+    }
+
+    #[test]
+    fn test_lex_question_mark() {
+        let tokens = lex("x?").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "x"));
+        assert!(matches!(tokens[1].kind, TokenKind::Question));
+    }
+
+    #[test]
+    fn test_lex_underscore_token() {
+        let tokens = lex("_").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Underscore));
+    }
+
+    #[test]
+    fn test_lex_await_keyword() {
+        let tokens = lex("await").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Await));
+    }
+
+    #[test]
+    fn test_lex_dyn_keyword() {
+        let tokens = lex("dyn").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Dyn));
+    }
+
+    #[test]
+    fn test_lex_as_keyword() {
+        let tokens = lex("x as Int").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "x"));
+        assert!(matches!(tokens[1].kind, TokenKind::As));
+        assert!(matches!(tokens[2].kind, TokenKind::UpperIdent(ref s) if s == "Int"));
+    }
+
+    #[test]
+    fn test_lex_when_keyword() {
+        let tokens = lex("when").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::When));
+    }
+
+    #[test]
+    fn test_lex_ampersand() {
+        let tokens = lex("&x").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ampersand));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "x"));
+    }
+
+    #[test]
+    fn test_lex_pipe_symbol() {
+        let tokens = lex("|").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Pipe));
+    }
+
+    #[test]
+    fn test_lex_negative_number() {
+        // Minus is a separate token, not part of the number
+        let tokens = lex("-42").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Minus));
+        assert!(matches!(tokens[1].kind, TokenKind::Int(42)));
+    }
+
+    #[test]
+    fn test_lex_annotation_syntax() {
+        let tokens = lex("@[cfg(test)]").unwrap();
+        // '@' followed by '[' — check both exist
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        // The lexer should handle @[ for annotations
+        assert!(tokens.len() >= 2, "Annotation should produce tokens");
+    }
 }

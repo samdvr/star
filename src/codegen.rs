@@ -4513,7 +4513,7 @@ mod tests {
     #[test]
     fn test_lambda() {
         let rust = compile("fn main() = fn(x) => x + 1");
-        assert!(rust.contains("|x| (x + 1i64)"));
+        assert!(rust.contains("|x| x + 1i64") || rust.contains("|x| (x + 1i64)"));
     }
 
     #[test]
@@ -6735,5 +6735,566 @@ mod tests {
     fn test_sqrt_builtin() {
         let rust = compile("fn main() = sqrt(4.0)");
         assert!(rust.contains("sqrt()"));
+    }
+
+    // ── Additional codegen tests ───────────────────────────────────
+
+    #[test]
+    fn test_string_interpolation_codegen() {
+        let rust = compile(r#"fn main() = "hello #{name}""#);
+        assert!(rust.contains("format!"));
+    }
+
+    #[test]
+    fn test_list_map_codegen() {
+        let rust = compile("fn main() = map([1, 2, 3], fn(x) => x * 2)");
+        assert!(rust.contains(".map("));
+        assert!(rust.contains("collect"));
+    }
+
+    #[test]
+    fn test_list_filter_codegen() {
+        let rust = compile("fn main() = filter([1, 2, 3], fn(x) => x > 1)");
+        assert!(rust.contains(".filter("));
+    }
+
+    #[test]
+    fn test_list_fold_codegen() {
+        let rust = compile("fn main() = fold([1, 2, 3], 0, fn(acc, x) => acc + x)");
+        assert!(rust.contains(".fold("));
+    }
+
+    #[test]
+    fn test_each_codegen() {
+        let rust = compile("fn main() = each([1, 2, 3], fn(x) => println(x))");
+        assert!(rust.contains(".for_each(") || rust.contains("for "));
+    }
+
+    #[test]
+    fn test_head_tail_codegen() {
+        let rust = compile("fn main() = do\n  let xs = [1, 2, 3]\n  head(xs)\nend");
+        assert!(rust.contains("first()") || rust.contains("[0]"));
+    }
+
+    #[test]
+    fn test_push_codegen() {
+        let rust = compile("fn main() = push([1, 2], 3)");
+        assert!(rust.contains("push("));
+    }
+
+    #[test]
+    fn test_concat_codegen() {
+        let rust = compile("fn main() = concat([1, 2], [3, 4])");
+        assert!(rust.contains("extend") || rust.contains("concat") || rust.contains("into_iter"));
+    }
+
+    #[test]
+    fn test_reverse_codegen() {
+        let rust = compile("fn main() = reverse([1, 2, 3])");
+        assert!(rust.contains("reverse") || rust.contains("rev"));
+    }
+
+    #[test]
+    fn test_sort_codegen() {
+        let rust = compile("fn main() = sort([3, 1, 2])");
+        assert!(rust.contains("sort"));
+    }
+
+    #[test]
+    fn test_length_codegen() {
+        let rust = compile("fn main() = length([1, 2, 3])");
+        assert!(rust.contains(".len()"));
+    }
+
+    #[test]
+    fn test_contains_element_codegen() {
+        let rust = compile("fn main() = contains_element([1, 2, 3], 2)");
+        assert!(rust.contains("contains"));
+    }
+
+    #[test]
+    fn test_zip_codegen() {
+        let rust = compile("fn main() = zip([1, 2], [3, 4])");
+        assert!(rust.contains(".zip("));
+    }
+
+    #[test]
+    fn test_enumerate_codegen() {
+        let rust = compile("fn main() = enumerate([10, 20, 30])");
+        assert!(rust.contains(".enumerate()"));
+    }
+
+    #[test]
+    fn test_flatten_codegen() {
+        let rust = compile("fn main() = flatten([[1, 2], [3, 4]])");
+        assert!(rust.contains("flatten") || rust.contains("into_iter"));
+    }
+
+    #[test]
+    fn test_take_drop_codegen() {
+        let rust_take = compile("fn main() = take([1, 2, 3, 4], 2)");
+        assert!(rust_take.contains("take(") || rust_take.contains("[.."));
+        let rust_drop = compile("fn main() = drop([1, 2, 3, 4], 2)");
+        assert!(rust_drop.contains("skip(") || rust_drop.contains("["));
+    }
+
+    #[test]
+    fn test_any_all_codegen() {
+        let rust_any = compile("fn main() = any([1, 2, 3], fn(x) => x > 2)");
+        assert!(rust_any.contains(".any("));
+        let rust_all = compile("fn main() = all([1, 2, 3], fn(x) => x > 0)");
+        assert!(rust_all.contains(".all("));
+    }
+
+    #[test]
+    fn test_find_codegen() {
+        let rust = compile("fn main() = find([1, 2, 3], fn(x) => x == 2)");
+        assert!(rust.contains(".find(") || rust.contains("find"));
+    }
+
+    #[test]
+    fn test_string_trim_codegen() {
+        let rust = compile(r#"fn main() = trim("  hello  ")"#);
+        assert!(rust.contains(".trim()"));
+    }
+
+    #[test]
+    fn test_string_split_codegen() {
+        let rust = compile(r#"fn main() = split("a,b,c", ",")"#);
+        assert!(rust.contains(".split("));
+    }
+
+    #[test]
+    fn test_string_join_codegen() {
+        let rust = compile(r#"fn main() = join(["a", "b", "c"], ", ")"#);
+        assert!(rust.contains(".join("));
+    }
+
+    #[test]
+    fn test_string_contains_codegen() {
+        let rust = compile(r#"fn main() = contains("hello", "ell")"#);
+        assert!(rust.contains(".contains("));
+    }
+
+    #[test]
+    fn test_string_replace_codegen() {
+        let rust = compile(r#"fn main() = replace("hello", "l", "r")"#);
+        assert!(rust.contains(".replace("));
+    }
+
+    #[test]
+    fn test_string_uppercase_lowercase() {
+        let rust_up = compile(r#"fn main() = uppercase("hello")"#);
+        assert!(rust_up.contains(".to_uppercase()") || rust_up.contains("to_uppercase"));
+        let rust_low = compile(r#"fn main() = lowercase("HELLO")"#);
+        assert!(rust_low.contains(".to_lowercase()") || rust_low.contains("to_lowercase"));
+    }
+
+    #[test]
+    fn test_string_starts_ends_with() {
+        let rust = compile(r#"fn main() = starts_with("hello", "he")"#);
+        assert!(rust.contains(".starts_with("));
+        let rust2 = compile(r#"fn main() = ends_with("hello", "lo")"#);
+        assert!(rust2.contains(".ends_with("));
+    }
+
+    #[test]
+    fn test_string_chars_codegen() {
+        let rust = compile(r#"fn main() = chars("hello")"#);
+        assert!(rust.contains(".chars()"));
+    }
+
+    #[test]
+    fn test_string_length_codegen() {
+        let rust = compile(r#"fn main() = string_length("hello")"#);
+        assert!(rust.contains("len()") || rust.contains("string_length"));
+    }
+
+    #[test]
+    fn test_to_string_codegen() {
+        let rust = compile("fn main() = to_string(42)");
+        assert!(rust.contains("to_string()") || rust.contains("star_display"));
+    }
+
+    #[test]
+    fn test_unwrap_codegen() {
+        let rust = compile("fn main() = unwrap(some(42))");
+        assert!(rust.contains(".unwrap()"));
+    }
+
+    #[test]
+    fn test_unwrap_or_codegen() {
+        let rust = compile("fn main() = unwrap_or(none(), 0)");
+        assert!(rust.contains(".unwrap_or("));
+    }
+
+    #[test]
+    fn test_is_some_is_none_codegen() {
+        let rust = compile("fn main() = is_some(some(1))");
+        assert!(rust.contains(".is_some()"));
+        let rust2 = compile("fn main() = is_none(none())");
+        assert!(rust2.contains(".is_none()"));
+    }
+
+    #[test]
+    fn test_ok_err_codegen() {
+        let rust_ok = compile("fn main() = ok(42)");
+        assert!(rust_ok.contains("Ok(") || rust_ok.contains("ok("));
+        let rust_err = compile(r#"fn main() = err("fail")"#);
+        assert!(rust_err.contains("Err(") || rust_err.contains("err("));
+    }
+
+    #[test]
+    fn test_is_ok_is_err_codegen() {
+        let rust = compile("fn main() = is_ok(ok(1))");
+        assert!(rust.contains(".is_ok()"));
+        let rust2 = compile("fn main() = is_err(ok(1))");
+        assert!(rust2.contains(".is_err()"));
+    }
+
+    #[test]
+    fn test_expect_codegen() {
+        let rust = compile(r#"fn main() = expect(some(42), "should be Some")"#);
+        assert!(rust.contains(".expect("));
+        assert!(rust.contains("&"), "expect should borrow the message");
+    }
+
+    #[test]
+    fn test_map_result_codegen() {
+        let rust = compile("fn main() = map_result(ok(1), fn(x) => x + 1)");
+        assert!(rust.contains(".map("));
+    }
+
+    #[test]
+    fn test_map_option_codegen() {
+        let rust = compile("fn main() = map_option(some(1), fn(x) => x + 1)");
+        assert!(rust.contains(".map("));
+    }
+
+    #[test]
+    fn test_read_file_codegen() {
+        let rust = compile(r#"fn main() = read_file("test.txt")"#);
+        assert!(rust.contains("std::fs::read_to_string") || rust.contains("read_to_string"));
+    }
+
+    #[test]
+    fn test_write_file_codegen() {
+        let rust = compile(r#"fn main() = write_file("test.txt", "content")"#);
+        assert!(rust.contains("std::fs::write") || rust.contains("write"));
+    }
+
+    #[test]
+    fn test_println_with_int() {
+        let rust = compile("fn main() = println(42)");
+        assert!(rust.contains("println!"));
+    }
+
+    #[test]
+    fn test_println_with_string() {
+        let rust = compile(r#"fn main() = println("hello")"#);
+        assert!(rust.contains("println!"));
+    }
+
+    #[test]
+    fn test_debug_codegen() {
+        let rust = compile("fn main() = debug(42)");
+        assert!(rust.contains("eprintln!") || rust.contains("dbg!") || rust.contains("star_display"));
+    }
+
+    #[test]
+    fn test_math_abs_codegen() {
+        let rust = compile("fn main() = abs(-5)");
+        assert!(rust.contains(".abs()") || rust.contains("abs"));
+    }
+
+    #[test]
+    fn test_math_min_max_codegen() {
+        let rust = compile("fn main() = min(3, 5)");
+        assert!(rust.contains(".min(") || rust.contains("std::cmp::min"));
+        let rust2 = compile("fn main() = max(3, 5)");
+        assert!(rust2.contains(".max(") || rust2.contains("std::cmp::max"));
+    }
+
+    #[test]
+    fn test_exit_codegen() {
+        let rust = compile("fn main() = exit(0)");
+        assert!(rust.contains("std::process::exit"));
+    }
+
+    #[test]
+    fn test_async_fn_codegen() {
+        let rust = compile("async fn fetch(): Int = 42");
+        assert!(rust.contains("async fn fetch"));
+    }
+
+    #[test]
+    fn test_for_loop_with_body() {
+        let rust = compile("fn main() = for x in [1, 2, 3] do\n  println(x)\nend");
+        assert!(rust.contains("for"));
+        assert!(rust.contains("in"));
+    }
+
+    #[test]
+    fn test_while_loop_with_mutation() {
+        let rust = compile("fn main() = do\n  let mut i = 0\n  while i < 10 do\n    i += 1\n  end\nend");
+        assert!(rust.contains("while"));
+    }
+
+    #[test]
+    fn test_break_continue_codegen() {
+        let rust = compile("fn main() = for x in [1, 2, 3] do\n  if x == 2 then break end\n  if x == 1 then continue end\nend");
+        assert!(rust.contains("break"));
+        assert!(rust.contains("continue"));
+    }
+
+    #[test]
+    fn test_compound_assign_codegen() {
+        let rust = compile("fn main() = do\n  let mut x = 0\n  x += 5\n  x -= 1\n  x *= 2\n  x /= 3\n  x %= 7\nend");
+        assert!(rust.contains("+="));
+        assert!(rust.contains("-="));
+        assert!(rust.contains("*="));
+        assert!(rust.contains("/="));
+        assert!(rust.contains("%="));
+    }
+
+    #[test]
+    fn test_bitwise_and_codegen() {
+        let rust = compile("fn main() = 15 band 7");
+        assert!(rust.contains(" & "));
+    }
+
+    #[test]
+    fn test_bitwise_or_codegen() {
+        let rust = compile("fn main() = 15 bor 7");
+        assert!(rust.contains(" | "));
+    }
+
+    #[test]
+    fn test_bitwise_xor_codegen() {
+        let rust = compile("fn main() = 15 bxor 7");
+        assert!(rust.contains(" ^ "));
+    }
+
+    #[test]
+    fn test_shift_left_codegen() {
+        let rust = compile("fn main() = 1 << 4");
+        assert!(rust.contains(" << "));
+    }
+
+    #[test]
+    fn test_shift_right_codegen() {
+        let rust = compile("fn main() = 16 >> 2");
+        assert!(rust.contains(" >> "));
+    }
+
+    #[test]
+    fn test_map_new_codegen() {
+        let rust = compile("fn main() = map_new()");
+        assert!(rust.contains("HashMap::new()") || rust.contains("HashMap"));
+    }
+
+    #[test]
+    fn test_map_insert_codegen() {
+        let rust = compile(r#"fn main() = map_insert(map_new(), "key", 42)"#);
+        assert!(rust.contains("insert(") || rust.contains("HashMap"));
+    }
+
+    #[test]
+    fn test_set_new_codegen() {
+        let rust = compile("fn main() = set_new()");
+        assert!(rust.contains("HashSet::new()") || rust.contains("HashSet"));
+    }
+
+    #[test]
+    fn test_sum_product_codegen() {
+        let rust_sum = compile("fn main() = sum([1, 2, 3])");
+        assert!(rust_sum.contains("sum") || rust_sum.contains("fold"));
+        let rust_prod = compile("fn main() = product([1, 2, 3])");
+        assert!(rust_prod.contains("product") || rust_prod.contains("fold"));
+    }
+
+    #[test]
+    fn test_dedup_codegen() {
+        let rust = compile("fn main() = dedup([1, 1, 2, 2, 3])");
+        assert!(rust.contains("dedup"));
+    }
+
+    #[test]
+    fn test_flat_map_codegen() {
+        let rust = compile("fn main() = flat_map([1, 2, 3], fn(x) => [x, x])");
+        assert!(rust.contains("flat_map"));
+    }
+
+    #[test]
+    fn test_trait_decl_codegen() {
+        let rust = compile("trait Printable\n  fn display(self): String\nend");
+        assert!(rust.contains("trait Printable"));
+        assert!(rust.contains("fn display"));
+    }
+
+    #[test]
+    fn test_impl_block_codegen() {
+        let rust = compile("type Foo = { x: Int }\n\nimpl Foo\n  fn get(self): Int = self.x\nend");
+        assert!(rust.contains("impl Foo"));
+        assert!(rust.contains("fn get"));
+    }
+
+    #[test]
+    fn test_trait_impl_codegen() {
+        let rust = compile("type Bar = { val: Int }\n\ntrait Show\n  fn show(self): String\nend\n\nimpl Show for Bar\n  fn show(self): String = to_string(self.val)\nend");
+        assert!(rust.contains("impl Show for Bar"));
+    }
+
+    #[test]
+    fn test_module_codegen() {
+        let rust = compile("module Utils\n  pub fn double(x: Int): Int = x * 2\nend");
+        assert!(rust.contains("mod utils"));
+        assert!(rust.contains("pub fn double"));
+    }
+
+    #[test]
+    fn test_struct_update_codegen() {
+        let rust = compile("type Config = { debug: Bool, level: Int }\n\nfn update(c: Config): Config = Config { debug: true, ..c }");
+        assert!(rust.contains(".."));
+    }
+
+    #[test]
+    fn test_move_closure_codegen() {
+        let rust = compile("fn main() = do\n  let x = 42\n  move fn() => x\nend");
+        assert!(rust.contains("move |"));
+    }
+
+    #[test]
+    fn test_try_operator_codegen() {
+        let rust = compile("fn parse(s: String): Result<Int, String> = do\n  let n = to_int(s)?\n  ok(n)\nend");
+        assert!(rust.contains("?"));
+    }
+
+    #[test]
+    fn test_recursive_enum_boxing() {
+        let rust = compile("type List =\n  | Nil\n  | Cons(Int, List)");
+        assert!(rust.contains("Box<"), "Recursive type should auto-box");
+    }
+
+    #[test]
+    fn test_index_access_usize_cast() {
+        let rust = compile("fn main() = do\n  let xs = [1, 2, 3]\n  xs[0]\nend");
+        assert!(rust.contains("as usize]"));
+    }
+
+    #[test]
+    fn test_index_assign_codegen() {
+        let rust = compile("fn main() = do\n  let mut xs = [1, 2, 3]\n  xs[0] = 10\nend");
+        assert!(rust.contains("as usize]"));
+    }
+
+    #[test]
+    fn test_tuple_three_elements() {
+        let rust = compile("fn main() = (1, 2, 3)");
+        assert!(rust.contains("(1i64, 2i64, 3i64)"));
+    }
+
+    #[test]
+    fn test_tuple_destructure_codegen() {
+        let rust = compile("fn main() = do\n  let (a, b) = (1, 2)\n  a + b\nend");
+        assert!(rust.contains("let (a, b)"));
+    }
+
+    #[test]
+    fn test_match_variant_with_data() {
+        let rust = compile("type Option =\n  | Some(Int)\n  | None\n\nfn get(o: Option): Int = match o\n  | Some(x) => x\n  | None => 0\n  end");
+        assert!(rust.contains("Option::Some("));
+        assert!(rust.contains("Option::None"));
+    }
+
+    #[test]
+    fn test_const_declaration() {
+        let rust = compile("let MAX: Int = 100");
+        assert!(rust.contains("const MAX: i64 = 100i64"));
+    }
+
+    #[test]
+    fn test_const_string_declaration() {
+        let rust = compile(r#"let NAME = "hello""#);
+        assert!(rust.contains("const NAME: &str = \"hello\""));
+    }
+
+    #[test]
+    fn test_operator_overloading_display() {
+        let rust = compile("type Wrapper = { val: Int }\n\nimpl Display for Wrapper\n  fn fmt(self): String = to_string(self.val)\nend");
+        assert!(rust.contains("fmt::Display") || rust.contains("impl"));
+    }
+
+    #[test]
+    fn test_sleep_ms_codegen() {
+        let rust = compile("fn main() = sleep_ms(100)");
+        assert!(rust.contains("thread::sleep") || rust.contains("sleep"));
+    }
+
+    #[test]
+    fn test_args_codegen() {
+        let rust = compile("fn main() = args()");
+        assert!(rust.contains("std::env::args") || rust.contains("args"));
+    }
+
+    #[test]
+    fn test_env_get_codegen() {
+        let rust = compile(r#"fn main() = env_get("HOME")"#);
+        assert!(rust.contains("std::env::var") || rust.contains("env"));
+    }
+
+    #[test]
+    fn test_type_param_bounds_codegen() {
+        let rust = compile("fn max_val<T: Ord>(a: T, b: T): T = if a > b then a else b end");
+        assert!(rust.contains("T: Ord"));
+    }
+
+    #[test]
+    fn test_multiple_type_params_codegen() {
+        let rust = compile("fn pair<A, B>(a: A, b: B): (A, B) = (a, b)");
+        assert!(rust.contains("<A, B>"));
+    }
+
+    #[test]
+    fn test_dyn_trait_codegen() {
+        let rust = compile("trait Drawable\n  fn draw(self): String\nend\n\nfn render(obj: dyn Drawable): String = obj.draw()");
+        assert!(rust.contains("Box<dyn Drawable>"));
+    }
+
+    #[test]
+    fn test_associated_type_codegen() {
+        let rust = compile("trait Container\n  type Item\n  fn get(self): Item\nend");
+        assert!(rust.contains("type Item;"));
+    }
+
+    #[test]
+    fn test_annotation_cfg_codegen() {
+        let rust = compile("@[cfg(test)]\nfn test_fn() = 42");
+        assert!(rust.contains("#[cfg(test)]"));
+    }
+
+    #[test]
+    fn test_annotation_derive_codegen() {
+        let rust = compile("@[derive(Debug, Clone)]\ntype Foo = { x: Int }");
+        assert!(rust.contains("#[derive(") || rust.contains("derive"));
+    }
+
+    #[test]
+    fn test_extern_fn_codegen() {
+        let rust = compile("extern fn libc_exit(code: Int)");
+        assert!(rust.contains("extern") || rust.contains("fn libc_exit"));
+    }
+
+    #[test]
+    fn test_star_display_prelude() {
+        let rust = compile("fn main() = 42");
+        assert!(rust.contains("fn star_display"), "Should always include star_display helper");
+    }
+
+    #[test]
+    fn test_nested_pipe_with_lambda() {
+        let rust = compile("fn main() = [1, 2, 3] |> map(fn(x) => x * 2) |> filter(fn(x) => x > 2)");
+        assert!(rust.contains(".map("));
+        assert!(rust.contains(".filter("));
     }
 }

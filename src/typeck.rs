@@ -754,7 +754,7 @@ impl Infer {
 
         match name {
             // List -> List operations (preserve or transform element type)
-            "map" | "flat_map" => {
+            "map" => {
                 // map(fn(A) -> B) returns List<B>
                 if let Some(fn_ty) = extra_arg_types.first() {
                     let resolved = self.apply(fn_ty);
@@ -763,6 +763,25 @@ impl Infer {
                     }
                 }
                 // If we know the element type, return List<fresh>
+                if elem_ty.is_some() {
+                    return Some(Type::List(Box::new(self.fresh_var())));
+                }
+                None
+            }
+            "flat_map" => {
+                // flat_map(fn(A) -> List<B>) returns List<B>
+                if let Some(fn_ty) = extra_arg_types.first() {
+                    let resolved = self.apply(fn_ty);
+                    if let Type::Function(_, ret) = &resolved {
+                        let resolved_ret = self.apply(ret);
+                        // If callback returns List<B>, result is List<B>
+                        if let Type::List(_) = &resolved_ret {
+                            return Some(resolved_ret);
+                        }
+                        // Otherwise treat like map: wrap in List
+                        return Some(Type::List(ret.clone()));
+                    }
+                }
                 if elem_ty.is_some() {
                     return Some(Type::List(Box::new(self.fresh_var())));
                 }
@@ -3111,5 +3130,389 @@ mod tests {
         let t1 = Type::Tuple(vec![Type::Int, Type::Str]);
         let t2 = Type::Tuple(vec![Type::Int]);
         assert!(!infer.unify(&t1, &t2));
+    }
+
+    // ── Additional type checker tests ──────────────────────────────
+
+    #[test]
+    fn test_infer_list_int_literal() {
+        let mut infer = Infer::new();
+        let list = mk_expr(ExprKind::ListLit(vec![
+            mk_expr(ExprKind::IntLit(1)),
+            mk_expr(ExprKind::IntLit(2)),
+            mk_expr(ExprKind::IntLit(3)),
+        ]));
+        let ty = infer.infer_expr(&list);
+        match ty {
+            Type::List(_) => {} // List type is correct regardless of inner inference
+            _ => panic!("Expected List type, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn test_infer_empty_list_type() {
+        let mut infer = Infer::new();
+        let list = mk_expr(ExprKind::ListLit(vec![]));
+        let ty = infer.infer_expr(&list);
+        match ty {
+            Type::List(_) => {}
+            _ => panic!("Expected List type, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn test_infer_tuple_int_str() {
+        let mut infer = Infer::new();
+        let tuple = mk_expr(ExprKind::Tuple(vec![
+            mk_expr(ExprKind::IntLit(1)),
+            mk_expr(ExprKind::StringLit("hello".to_string())),
+        ]));
+        let ty = infer.infer_expr(&tuple);
+        match ty {
+            Type::Tuple(types) => {
+                assert_eq!(types.len(), 2);
+                assert_eq!(types[0], Type::Int);
+                assert_eq!(types[1], Type::Str);
+            }
+            _ => panic!("Expected Tuple, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn test_infer_if_with_else() {
+        let mut infer = Infer::new();
+        let if_expr = mk_expr(ExprKind::If(
+            Box::new(mk_expr(ExprKind::BoolLit(true))),
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            Some(Box::new(mk_expr(ExprKind::IntLit(2)))),
+        ));
+        let ty = infer.infer_expr(&if_expr);
+        assert_eq!(ty, Type::Int);
+    }
+
+    #[test]
+    fn test_infer_addition() {
+        let mut infer = Infer::new();
+        let add = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            crate::ast::BinOp::Add,
+            Box::new(mk_expr(ExprKind::IntLit(2))),
+        ));
+        assert_eq!(infer.infer_expr(&add), Type::Int);
+    }
+
+    #[test]
+    fn test_infer_less_than() {
+        let mut infer = Infer::new();
+        let cmp = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            crate::ast::BinOp::Lt,
+            Box::new(mk_expr(ExprKind::IntLit(2))),
+        ));
+        assert_eq!(infer.infer_expr(&cmp), Type::Bool);
+    }
+
+    #[test]
+    fn test_infer_eq_returns_bool() {
+        let mut infer = Infer::new();
+        let eq = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            crate::ast::BinOp::Eq,
+            Box::new(mk_expr(ExprKind::IntLit(2))),
+        ));
+        assert_eq!(infer.infer_expr(&eq), Type::Bool);
+    }
+
+    #[test]
+    fn test_infer_and_expr() {
+        let mut infer = Infer::new();
+        let and_expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::BoolLit(true))),
+            crate::ast::BinOp::And,
+            Box::new(mk_expr(ExprKind::BoolLit(false))),
+        ));
+        assert_eq!(infer.infer_expr(&and_expr), Type::Bool);
+    }
+
+    #[test]
+    fn test_infer_not_expr() {
+        let mut infer = Infer::new();
+        let not_expr = mk_expr(ExprKind::UnaryOp(
+            crate::ast::UnaryOp::Not,
+            Box::new(mk_expr(ExprKind::BoolLit(true))),
+        ));
+        assert_eq!(infer.infer_expr(&not_expr), Type::Bool);
+    }
+
+    #[test]
+    fn test_infer_neg_int() {
+        let mut infer = Infer::new();
+        let neg = mk_expr(ExprKind::UnaryOp(
+            crate::ast::UnaryOp::Neg,
+            Box::new(mk_expr(ExprKind::IntLit(42))),
+        ));
+        assert_eq!(infer.infer_expr(&neg), Type::Int);
+    }
+
+    #[test]
+    fn test_unify_var_to_int() {
+        let mut infer = Infer::new();
+        let var = infer.fresh_var();
+        assert!(infer.unify(&var, &Type::Int));
+    }
+
+    #[test]
+    fn test_unify_two_fresh_vars() {
+        let mut infer = Infer::new();
+        let v1 = infer.fresh_var();
+        let v2 = infer.fresh_var();
+        assert!(infer.unify(&v1, &v2));
+        // After unifying with each other, unifying one with Int should succeed
+        assert!(infer.unify(&v1, &Type::Int));
+    }
+
+    #[test]
+    fn test_unify_list_int_int() {
+        let mut infer = Infer::new();
+        let l1 = Type::List(Box::new(Type::Int));
+        let l2 = Type::List(Box::new(Type::Int));
+        assert!(infer.unify(&l1, &l2));
+    }
+
+    #[test]
+    fn test_unify_list_int_str_fails() {
+        let mut infer = Infer::new();
+        let l1 = Type::List(Box::new(Type::Int));
+        let l2 = Type::List(Box::new(Type::Str));
+        assert!(!infer.unify(&l1, &l2));
+    }
+
+    #[test]
+    fn test_unify_nested_list_int() {
+        let mut infer = Infer::new();
+        let l1 = Type::List(Box::new(Type::List(Box::new(Type::Int))));
+        let l2 = Type::List(Box::new(Type::List(Box::new(Type::Int))));
+        assert!(infer.unify(&l1, &l2));
+    }
+
+    #[test]
+    fn test_unify_fn_arity_mismatch() {
+        let mut infer = Infer::new();
+        let f1 = Type::Function(vec![Type::Int], Box::new(Type::Int));
+        let f2 = Type::Function(vec![Type::Int, Type::Int], Box::new(Type::Int));
+        assert!(!infer.unify(&f1, &f2));
+    }
+
+    #[test]
+    fn test_check_function_double() {
+        let mut infer = Infer::new();
+        let f = mk_fn(
+            "double",
+            vec![mk_param("x", Some(int_ty()))],
+            Some(int_ty()),
+            mk_expr(ExprKind::BinOp(
+                Box::new(mk_expr(ExprKind::Ident("x".to_string()))),
+                crate::ast::BinOp::Mul,
+                Box::new(mk_expr(ExprKind::IntLit(2))),
+            )),
+        );
+        let errors_before = infer.errors.len();
+        infer.check_function(&f);
+        assert_eq!(infer.errors.len(), errors_before, "double(x: Int): Int should type check");
+    }
+
+    #[test]
+    fn test_check_function_bad_return() {
+        let mut infer = Infer::new();
+        let f = mk_fn(
+            "bad",
+            vec![mk_param("x", Some(int_ty()))],
+            Some(str_ty()),
+            mk_expr(ExprKind::Ident("x".to_string())),
+        );
+        infer.check_function(&f);
+        assert!(!infer.errors.is_empty(), "Return type mismatch should produce error");
+    }
+
+    #[test]
+    fn test_infer_block_last_expr() {
+        let mut infer = Infer::new();
+        let block = mk_expr(ExprKind::Block(
+            vec![
+                Stmt::Expr(mk_expr(ExprKind::IntLit(1))),
+                Stmt::Expr(mk_expr(ExprKind::IntLit(2))),
+            ],
+            Box::new(mk_expr(ExprKind::StringLit("hello".to_string()))),
+        ));
+        let ty = infer.infer_expr(&block);
+        assert_eq!(ty, Type::Str, "Block should return type of last expression");
+    }
+
+    #[test]
+    fn test_infer_single_block() {
+        let mut infer = Infer::new();
+        let block = mk_expr(ExprKind::Block(
+            vec![],
+            Box::new(mk_expr(ExprKind::IntLit(42))),
+        ));
+        assert_eq!(infer.infer_expr(&block), Type::Int);
+    }
+
+    #[test]
+    fn test_infer_float_add() {
+        let mut infer = Infer::new();
+        let add = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::FloatLit(1.0))),
+            crate::ast::BinOp::Add,
+            Box::new(mk_expr(ExprKind::FloatLit(2.0))),
+        ));
+        assert_eq!(infer.infer_expr(&add), Type::Float);
+    }
+
+    #[test]
+    fn test_infer_string_plus() {
+        let mut infer = Infer::new();
+        let concat = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::StringLit("hello".to_string()))),
+            crate::ast::BinOp::Add,
+            Box::new(mk_expr(ExprKind::StringLit(" world".to_string()))),
+        ));
+        let ty = infer.infer_expr(&concat);
+        assert_eq!(ty, Type::Str, "String + String should be String");
+    }
+
+    #[test]
+    fn test_unify_named_type_same() {
+        let mut infer = Infer::new();
+        let t1 = Type::Named("Foo".to_string(), vec![]);
+        let t2 = Type::Named("Foo".to_string(), vec![]);
+        assert!(infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_unify_named_type_different() {
+        let mut infer = Infer::new();
+        let t1 = Type::Named("Foo".to_string(), vec![]);
+        let t2 = Type::Named("Bar".to_string(), vec![]);
+        assert!(!infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_unify_named_type_with_params() {
+        let mut infer = Infer::new();
+        let t1 = Type::Named("Option".to_string(), vec![Type::Int]);
+        let t2 = Type::Named("Option".to_string(), vec![Type::Int]);
+        assert!(infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_unify_named_type_params_mismatch() {
+        let mut infer = Infer::new();
+        let t1 = Type::Named("Option".to_string(), vec![Type::Int]);
+        let t2 = Type::Named("Option".to_string(), vec![Type::Str]);
+        assert!(!infer.unify(&t1, &t2));
+    }
+
+    #[test]
+    fn test_infer_or_expr() {
+        let mut infer = Infer::new();
+        let or_expr = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::BoolLit(false))),
+            crate::ast::BinOp::Or,
+            Box::new(mk_expr(ExprKind::BoolLit(true))),
+        ));
+        assert_eq!(infer.infer_expr(&or_expr), Type::Bool);
+    }
+
+    #[test]
+    fn test_infer_subtraction() {
+        let mut infer = Infer::new();
+        let sub = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(10))),
+            crate::ast::BinOp::Sub,
+            Box::new(mk_expr(ExprKind::IntLit(3))),
+        ));
+        assert_eq!(infer.infer_expr(&sub), Type::Int);
+    }
+
+    #[test]
+    fn test_infer_multiplication() {
+        let mut infer = Infer::new();
+        let mul = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(4))),
+            crate::ast::BinOp::Mul,
+            Box::new(mk_expr(ExprKind::IntLit(5))),
+        ));
+        assert_eq!(infer.infer_expr(&mul), Type::Int);
+    }
+
+    #[test]
+    fn test_infer_division() {
+        let mut infer = Infer::new();
+        let div = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(10))),
+            crate::ast::BinOp::Div,
+            Box::new(mk_expr(ExprKind::IntLit(2))),
+        ));
+        assert_eq!(infer.infer_expr(&div), Type::Int);
+    }
+
+    #[test]
+    fn test_infer_modulo() {
+        let mut infer = Infer::new();
+        let modulo = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(10))),
+            crate::ast::BinOp::Mod,
+            Box::new(mk_expr(ExprKind::IntLit(3))),
+        ));
+        assert_eq!(infer.infer_expr(&modulo), Type::Int);
+    }
+
+    #[test]
+    fn test_infer_gt_comparison() {
+        let mut infer = Infer::new();
+        let gt = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(5))),
+            crate::ast::BinOp::Gt,
+            Box::new(mk_expr(ExprKind::IntLit(3))),
+        ));
+        assert_eq!(infer.infer_expr(&gt), Type::Bool);
+    }
+
+    #[test]
+    fn test_infer_ne_comparison() {
+        let mut infer = Infer::new();
+        let ne = mk_expr(ExprKind::BinOp(
+            Box::new(mk_expr(ExprKind::IntLit(1))),
+            crate::ast::BinOp::Ne,
+            Box::new(mk_expr(ExprKind::IntLit(2))),
+        ));
+        assert_eq!(infer.infer_expr(&ne), Type::Bool);
+    }
+
+    #[test]
+    fn test_fresh_var_unique() {
+        let mut infer = Infer::new();
+        let v1 = infer.fresh_var();
+        let v2 = infer.fresh_var();
+        let v3 = infer.fresh_var();
+        // Each should be a different Var
+        assert_ne!(v1, v2);
+        assert_ne!(v2, v3);
+    }
+
+    #[test]
+    fn test_unify_error_type() {
+        let mut infer = Infer::new();
+        // Error type should unify with anything (to prevent cascading errors)
+        assert!(infer.unify(&Type::Error, &Type::Int));
+        assert!(infer.unify(&Type::Str, &Type::Error));
+    }
+
+    #[test]
+    fn test_unify_unit_types() {
+        let mut infer = Infer::new();
+        assert!(infer.unify(&Type::Unit, &Type::Unit));
+        assert!(!infer.unify(&Type::Unit, &Type::Int));
     }
 }

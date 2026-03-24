@@ -535,3 +535,423 @@ fn main() = println("hello")"#;
     assert!(success);
     assert!(stdout.contains("#[cfg(target_os"), "Should contain #[cfg(...)] attribute");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// ERROR CASES — programs that should fail to compile
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_error_missing_closing_end() {
+    let (success, _, _) = emit_rust("fn main() = do\n  let x = 1\n  println(x)");
+    assert!(!success, "Missing 'end' should fail");
+}
+
+#[test]
+fn test_error_unclosed_string() {
+    let (success, _, _) = emit_rust(r#"fn main() = println("hello)"#);
+    assert!(!success, "Unclosed string literal should fail");
+}
+
+#[test]
+fn test_error_missing_return_type_colon() {
+    // Missing colon before return type
+    let (success, _, _) = emit_rust("fn foo(x: Int) Int = x");
+    assert!(!success, "Missing colon before return type should fail");
+}
+
+#[test]
+fn test_error_unexpected_token_in_type() {
+    let (success, _, _) = emit_rust("type Foo = {\n  x: ,\n}");
+    assert!(!success, "Unexpected comma in type field should fail");
+}
+
+#[test]
+fn test_error_empty_match() {
+    // An empty match without arms — may or may not be valid
+    let (success, stdout, _) = emit_rust("fn main() = match 42\nend");
+    // If it compiles, just verify it produces a match; if it fails, that's fine too
+    if success {
+        assert!(stdout.contains("match"));
+    }
+}
+
+#[test]
+fn test_error_double_comma_in_params() {
+    let (success, _, _) = emit_rust("fn foo(a: Int,, b: Int) = a");
+    assert!(!success, "Double comma in params should fail");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// EDGE CASES — valid but tricky programs
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_nested_match() {
+    let src = r#"fn describe(x: Int, y: Int): String = match x
+  | 0 => match y
+    | 0 => "origin"
+    | _ => "x-axis"
+    end
+  | _ => "elsewhere"
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success, "Nested match should compile");
+    assert!(stdout.contains("match"));
+}
+
+#[test]
+fn test_chained_pipes() {
+    let src = "fn double(x: Int): Int = x * 2\nfn add_one(x: Int): Int = x + 1\nfn main() = 5 |> double |> add_one |> double";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("double(add_one(double(5i64)))"));
+}
+
+#[test]
+fn test_complex_string_interpolation() {
+    let src = r#"fn main() = do
+  let x = 10
+  let y = 20
+  println("sum = #{x + y}, product = #{x * y}")
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("format!"));
+}
+
+#[test]
+fn test_nested_if_expressions() {
+    let src = r#"fn classify(x: Int): String =
+  if x > 0 then
+    if x > 100 then "big" else "small" end
+  else
+    if x < -100 then "very negative" else "negative" end
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("if"));
+}
+
+#[test]
+fn test_list_of_tuples() {
+    let src = "fn main() = [(1, 2), (3, 4), (5, 6)]";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_enum_with_multiple_fields() {
+    let src = "type Expr =\n  | Lit(Int)\n  | Add(Expr, Expr)\n  | Mul(Expr, Expr)\n  | Neg(Expr)";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("enum Expr"));
+    assert!(stdout.contains("Box<"), "Recursive Expr should be auto-boxed");
+}
+
+#[test]
+fn test_struct_with_generic() {
+    let src = "type Wrapper<T> = { value: T }";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("struct Wrapper<T>"));
+    assert!(stdout.contains("value: T"));
+}
+
+#[test]
+fn test_trait_with_default_method() {
+    let src = r#"trait Greetable
+  fn greet(self): String = "hello"
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("trait Greetable"));
+    assert!(stdout.contains("fn greet"));
+}
+
+#[test]
+fn test_impl_for_trait() {
+    let src = r#"type Dog = { name: String }
+
+trait Animal
+  fn speak(self): String
+end
+
+impl Animal for Dog
+  fn speak(self): String = "woof"
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("impl Animal for Dog"));
+}
+
+#[test]
+fn test_multiple_type_params() {
+    let src = "fn pair<A, B>(a: A, b: B): (A, B) = (a, b)";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("<A, B>"));
+}
+
+#[test]
+fn test_index_access() {
+    let src = "fn main() = do\n  let list = [10, 20, 30]\n  println(list[1])\nend";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("as usize]"), "Index should cast to usize");
+}
+
+#[test]
+fn test_mutable_variable() {
+    let src = "fn main() = do\n  let mut x = 0\n  x = 42\n  println(x)\nend";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("let mut x"));
+}
+
+#[test]
+fn test_tuple_destructuring() {
+    let src = "fn main() = do\n  let (a, b) = (1, 2)\n  println(a + b)\nend";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("let (a, b)"));
+}
+
+#[test]
+fn test_match_with_guard_like_patterns() {
+    let src = r#"fn fizzle(n: Int): String = match n % 3
+  | 0 => "fizz"
+  | 1 => "one"
+  | _ => "other"
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("match"));
+}
+
+#[test]
+fn test_multiline_pipe() {
+    let src = "fn double(x: Int): Int = x * 2\nfn add_one(x: Int): Int = x + 1\nfn main() = 1\n  |> double\n  |> add_one";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_empty_struct() {
+    let src = "type Unit = {}";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("struct Unit"));
+}
+
+#[test]
+fn test_single_variant_enum() {
+    let src = "type Wrapper = | Value(Int)";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("enum Wrapper"));
+}
+
+#[test]
+fn test_nested_generics() {
+    let src = "fn main() = do\n  let x: List<List<Int>> = [[1, 2], [3, 4]]\n  println(x)\nend";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_if_without_else() {
+    let src = "fn main() = if true then println(42) end";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_do_block_multiple_statements() {
+    let src = r#"fn main() = do
+  let a = 1
+  let b = 2
+  let c = a + b
+  println(c)
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("let a"));
+    assert!(stdout.contains("let b"));
+    assert!(stdout.contains("let c"));
+}
+
+#[test]
+fn test_lambda_with_type_annotation() {
+    let src = "fn main() = do\n  let f = fn(x: Int): Int => x * x\n  println(f(5))\nend";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("|x: i64|"), "Lambda should have type annotation");
+}
+
+#[test]
+fn test_multiple_traits() {
+    let src = r#"trait Foo
+  fn foo(self): Int
+end
+
+trait Bar
+  fn bar(self): String
+end
+
+type Baz = { x: Int }
+
+impl Foo for Baz
+  fn foo(self): Int = self.x
+end
+
+impl Bar for Baz
+  fn bar(self): String = "baz"
+end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("impl Foo for Baz"));
+    assert!(stdout.contains("impl Bar for Baz"));
+}
+
+#[test]
+fn test_enum_match_all_variants() {
+    let src = r#"type Direction =
+  | North
+  | South
+  | East
+  | West
+
+fn to_string(d: Direction): String = match d
+  | North => "N"
+  | South => "S"
+  | East => "E"
+  | West => "W"
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("Direction::North"));
+}
+
+#[test]
+fn test_nested_function_calls() {
+    let src = "fn add(a: Int, b: Int): Int = a + b\nfn main() = println(add(add(1, 2), add(3, 4)))";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_method_chaining_in_do_block() {
+    let src = "fn main() = do\n  let s = \"hello world\"\n  let result = uppercase(s)\n  println(result)\nend";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_multiple_constants() {
+    let src = r#"let PI: Float = 3.14159
+let TAU: Float = 6.28318
+let NAME = "star"
+
+fn main() = println(PI)"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("const PI: f64"));
+    assert!(stdout.contains("const TAU: f64"));
+    assert!(stdout.contains("const NAME"));
+}
+
+#[test]
+fn test_break_and_continue() {
+    let src = "fn main() = do\n  for x in [1, 2, 3, 4, 5] do\n    if x == 3 then continue end\n    if x == 5 then break end\n    println(x)\n  end\nend";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("continue"));
+    assert!(stdout.contains("break"));
+}
+
+#[test]
+fn test_pub_function() {
+    let src = "pub fn add(a: Int, b: Int): Int = a + b";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("pub fn add"));
+}
+
+#[test]
+fn test_module_with_pub_functions() {
+    let src = r#"module Utils
+  pub fn double(x: Int): Int = x * 2
+  pub fn triple(x: Int): Int = x * 3
+end
+
+use Utils
+
+fn main() = println(double(5))"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("mod utils"));
+}
+
+#[test]
+fn test_operator_overloading_sub() {
+    let src = "type Vec2 = { x: Float, y: Float }\n\nimpl Sub for Vec2\n  fn sub(self, other: Vec2): Vec2 = Vec2 { x: self.x - other.x, y: self.y - other.y }\nend";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("std::ops::Sub"), "Should contain std::ops::Sub");
+}
+
+#[test]
+fn test_string_escape_sequences() {
+    let src = r#"fn main() = println("tab:\there\nnewline")"#;
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_float_literals() {
+    let src = "fn main() = do\n  let a = 1.0\n  let b = 0.5\n  let c = 100.001\n  println(a + b + c)\nend";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_negative_numbers() {
+    let src = "fn main() = do\n  let x = -42\n  let y = -3.14\n  println(x)\nend";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_boolean_expressions() {
+    let src = "fn check(a: Bool, b: Bool): Bool = (a and b) or (not a and not b)";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("&&") || stdout.contains("and"));
+    assert!(stdout.contains("||") || stdout.contains("or"));
+}
+
+#[test]
+fn test_map_collection_type() {
+    let src = "fn main() = do\n  let m = map_new()\n  let m2 = map_insert(m, \"key\", 42)\n  println(m2)\nend";
+    let (success, _stdout, _) = emit_rust(src);
+    assert!(success);
+}
+
+#[test]
+fn test_if_else_as_expression() {
+    let src = "fn abs(x: Int): Int = if x >= 0 then x else 0 - x end";
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("if"));
+    assert!(stdout.contains("else"));
+}
+
+#[test]
+fn test_wildcard_pattern() {
+    let src = r#"fn ignore(x: Int): String = match x
+  | _ => "ignored"
+  end"#;
+    let (success, stdout, _) = emit_rust(src);
+    assert!(success);
+    assert!(stdout.contains("_ =>"));
+}

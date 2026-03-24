@@ -244,4 +244,134 @@ mod tests {
         // Should have 2 items (module + use), no extra loaded modules
         assert_eq!(result.unwrap().items.len(), 2);
     }
+
+    // ── Additional resolver tests ──────────────────────────────────
+
+    #[test]
+    fn test_pascal_to_snake_single_word() {
+        assert_eq!(pascal_to_snake("Hello"), "hello");
+    }
+
+    #[test]
+    fn test_pascal_to_snake_already_lowercase() {
+        assert_eq!(pascal_to_snake("hello"), "hello");
+    }
+
+    #[test]
+    fn test_pascal_to_snake_all_caps() {
+        assert_eq!(pascal_to_snake("ABC"), "a_b_c");
+    }
+
+    #[test]
+    fn test_pascal_to_snake_single_char() {
+        assert_eq!(pascal_to_snake("A"), "a");
+        assert_eq!(pascal_to_snake("x"), "x");
+    }
+
+    #[test]
+    fn test_pascal_to_snake_empty() {
+        assert_eq!(pascal_to_snake(""), "");
+    }
+
+    #[test]
+    fn test_pascal_to_snake_multiple_words() {
+        assert_eq!(pascal_to_snake("MyModule"), "my_module");
+        assert_eq!(pascal_to_snake("FileUtils"), "file_utils");
+        assert_eq!(pascal_to_snake("HttpClient"), "http_client");
+        assert_eq!(pascal_to_snake("IOStream"), "i_o_stream");
+    }
+
+    #[test]
+    fn test_pascal_to_snake_with_numbers() {
+        // Numbers are not uppercase, so they don't trigger underscore insertion
+        assert_eq!(pascal_to_snake("Base64"), "base64");
+        assert_eq!(pascal_to_snake("Vec2D"), "vec2_d");
+    }
+
+    #[test]
+    fn test_resolve_program_with_no_items() {
+        let program = Program { items: vec![] };
+        let result = resolve(program, "test.star");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().items.len(), 0);
+    }
+
+    #[test]
+    fn test_resolve_preserves_non_use_items() {
+        // Program with just functions and types (no use decls)
+        let program = Program {
+            items: vec![
+                Item::Function(crate::ast::Function {
+                    name: "main".to_string(),
+                    params: vec![],
+                    return_type: None,
+                    body: Expr {
+                        kind: ExprKind::IntLit(42),
+                        span: Span::new(1, 1),
+                    },
+                    is_pub: false,
+                    is_async: false,
+                    type_params: vec![],
+                    annotations: vec![],
+                    span: Span::new(1, 1),
+                }),
+            ],
+        };
+        let result = resolve(program, "test.star");
+        assert!(result.is_ok());
+        let prog = result.unwrap();
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Function(f) => assert_eq!(f.name, "main"),
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_use_nonexistent_module() {
+        // A use for a module that doesn't exist as a file should pass through
+        // (treated as a Rust module import)
+        let program = Program {
+            items: vec![
+                Item::UseDecl(UseDecl {
+                    path: vec!["NonExistent".to_string()],
+                    imports: None,
+                    span: Span::new(1, 1),
+                }),
+            ],
+        };
+        let result = resolve(program, "test.star");
+        assert!(result.is_ok(), "Non-existent module should not error (could be Rust)");
+    }
+
+    #[test]
+    fn test_resolve_multiple_inline_modules() {
+        let program = Program {
+            items: vec![
+                Item::ModuleDecl(ModuleDecl {
+                    name: "Alpha".to_string(),
+                    items: vec![],
+                    span: Span::new(1, 1),
+                }),
+                Item::ModuleDecl(ModuleDecl {
+                    name: "Beta".to_string(),
+                    items: vec![],
+                    span: Span::new(5, 1),
+                }),
+                Item::UseDecl(UseDecl {
+                    path: vec!["Alpha".to_string()],
+                    imports: None,
+                    span: Span::new(9, 1),
+                }),
+                Item::UseDecl(UseDecl {
+                    path: vec!["Beta".to_string()],
+                    imports: None,
+                    span: Span::new(10, 1),
+                }),
+            ],
+        };
+        let result = resolve(program, "test.star");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().items.len(), 4);
+    }
 }

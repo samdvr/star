@@ -92,6 +92,36 @@ impl Parser {
         }
     }
 
+    /// Expect a closing `>` for generic types. Handles the `>>` case where the
+    /// lexer produces a single `Shr` token for nested generics like `List<List<Int>>`.
+    fn expect_gt(&mut self) -> Result<(), String> {
+        if self.at(&TokenKind::Gt) {
+            self.advance();
+            Ok(())
+        } else if self.at(&TokenKind::Shr) {
+            // Split `>>` into `>` (consumed) + `>` (left for the outer generic)
+            self.split_shr_to_gt();
+            Ok(())
+        } else {
+            Err(format!(
+                "{} Expected Gt, got {:?}",
+                self.span(),
+                self.peek()
+            ))
+        }
+    }
+
+    /// Replace the current `Shr` (`>>`) token with `Gt` (`>`), effectively
+    /// consuming one `>` and leaving the other for the next parse step.
+    fn split_shr_to_gt(&mut self) {
+        self.skip_comments();
+        let span = self.tokens[self.pos].span;
+        self.tokens[self.pos] = Token {
+            kind: TokenKind::Gt,
+            span: Span::new(span.line, span.col + 1),
+        };
+    }
+
     fn skip_newlines(&mut self) {
         while self.at(&TokenKind::Newline) {
             self.advance();
@@ -457,7 +487,7 @@ impl Parser {
             self.advance();
             params.push(self.parse_type_param()?);
         }
-        self.expect(&TokenKind::Gt)?;
+        self.expect_gt()?;
         Ok(params)
     }
 
@@ -620,7 +650,7 @@ impl Parser {
         let args = if self.at(&TokenKind::Lt) {
             self.advance();
             let args = self.parse_type_list()?;
-            self.expect(&TokenKind::Gt)?;
+            self.expect_gt()?;
             args
         } else {
             Vec::new()
@@ -631,7 +661,7 @@ impl Parser {
 
     fn parse_type_list(&mut self) -> Result<Vec<TypeExpr>, String> {
         let mut types = Vec::new();
-        if self.at(&TokenKind::RParen) || self.at(&TokenKind::Gt) {
+        if self.at(&TokenKind::RParen) || self.at(&TokenKind::Gt) || self.at(&TokenKind::Shr) {
             return Ok(types);
         }
 
@@ -2654,6 +2684,442 @@ mod tests {
             Item::Function(f) => match &f.body.kind {
                 ExprKind::BinOp(_, BinOp::Or, _) => {}
                 _ => panic!("Expected 'or' as top-level binop"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    // ── Additional parser tests ────────────────────────────────────
+
+    #[test]
+    fn test_parse_struct_type_fields() {
+        let src = "type Point = {\n  x: Float,\n  y: Float\n}";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TypeDecl(td) => {
+                assert_eq!(td.name, "Point");
+                match &td.body {
+                    TypeBody::Struct(fields) => {
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].name, "x");
+                        assert_eq!(fields[1].name, "y");
+                    }
+                    _ => panic!("Expected struct"),
+                }
+            }
+            _ => panic!("Expected type decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trait_with_methods() {
+        let src = "trait Printable\n  fn to_str(self): String\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TraitDecl(t) => {
+                assert_eq!(t.name, "Printable");
+                assert_eq!(t.methods.len(), 1);
+                assert_eq!(t.methods[0].name, "to_str");
+            }
+            _ => panic!("Expected trait decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_impl_block_methods() {
+        let src = "type Foo = { x: Int }\n\nimpl Foo\n  fn get_x(self): Int = self.x\nend";
+        let prog = parse_str(src).unwrap();
+        let has_impl = prog.items.iter().any(|item| matches!(item, Item::ImplBlock(_)));
+        assert!(has_impl, "Should parse impl block");
+    }
+
+    #[test]
+    fn test_parse_match_four_arms() {
+        let src = r#"fn f(x: Int): String = match x
+  | 0 => "zero"
+  | 1 => "one"
+  | 2 => "two"
+  | _ => "other"
+  end"#;
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Match(_, arms) => assert_eq!(arms.len(), 4),
+                _ => panic!("Expected match expression"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_do_block_body() {
+        let src = "fn main() = do\n  let x = 1\n  let y = 2\n  x + y\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Block(_, _) => {}
+                _ => panic!("Expected block expression, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_loop_body() {
+        let src = "fn main() = for x in items do\n  println(x)\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::For(_, _, _) => {}
+                _ => panic!("Expected for loop"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_while_loop_body() {
+        let src = "fn main() = while true do\n  println(1)\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::While(_, _) => {}
+                _ => panic!("Expected while loop"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda_expression() {
+        let src = "fn main() = fn(x) => x + 1";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Lambda(_, _, _, _) => {}
+                _ => panic!("Expected lambda, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda_typed_params() {
+        let src = "fn main() = fn(x: Int, y: Int): Int => x + y";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Lambda(params, _, _, _) => {
+                    assert_eq!(params.len(), 2);
+                    assert!(params[0].ty.is_some());
+                    assert!(params[1].ty.is_some());
+                }
+                _ => panic!("Expected lambda"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pipe_chain() {
+        let src = "fn main() = 5 |> double |> add_one";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Pipe(_, _) => {}
+                _ => panic!("Expected pipe, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_list_three_elements() {
+        let src = "fn main() = [1, 2, 3]";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::ListLit(items) => assert_eq!(items.len(), 3),
+                _ => panic!("Expected list literal"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_list_literal() {
+        let src = "fn main() = []";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::ListLit(items) => assert_eq!(items.len(), 0),
+                _ => panic!("Expected empty list literal, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tuple_three_elements() {
+        let src = "fn main() = (1, 2, 3)";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Tuple(items) => assert_eq!(items.len(), 3),
+                _ => panic!("Expected tuple, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_if_else_branches() {
+        let src = "fn f(x: Int): Int = if x > 0 then x else 0 end";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::If(_, _, Some(_)) => {}
+                _ => panic!("Expected if-else expression"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_if_no_else() {
+        let src = "fn f(x: Int) = if x > 0 then println(x) end";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::If(_, _, None) => {}
+                _ => panic!("Expected if without else"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interp_string() {
+        let src = r#"fn main() = "hello #{name}""#;
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::StringInterp(_) => {}
+                _ => panic!("Expected string interpolation, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_construction() {
+        let src = "fn main() = Point { x: 1.0, y: 2.0 }";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::StructLit(name, _, _) => assert_eq!(name, "Point"),
+                _ => panic!("Expected struct literal, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dot_field_access() {
+        let src = "fn get_x(p: Point): Float = p.x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::FieldAccess(_, field) => assert_eq!(field, "x"),
+                _ => panic!("Expected field access, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_method_call_args() {
+        let src = "fn main() = obj.method(1, 2)";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::MethodCall(_, method, args) => {
+                    assert_eq!(method, "method");
+                    assert_eq!(args.len(), 2);
+                }
+                _ => panic!("Expected method call, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_declaration() {
+        let src = "module Math\n  pub fn double(x: Int): Int = x * 2\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::ModuleDecl(m) => {
+                assert_eq!(m.name, "Math");
+                assert!(!m.items.is_empty());
+            }
+            _ => panic!("Expected module decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_use_statement() {
+        let src = "use Math";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::UseDecl(u) => {
+                assert_eq!(u.path, vec!["Math"]);
+            }
+            _ => panic!("Expected use decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_async_fn() {
+        let src = "async fn fetch(): Int = 42";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert!(f.is_async);
+                assert_eq!(f.name, "fetch");
+            }
+            _ => panic!("Expected async function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pub_fn() {
+        let src = "pub fn add(x: Int, y: Int): Int = x + y";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert!(f.is_pub);
+                assert_eq!(f.name, "add");
+            }
+            _ => panic!("Expected pub function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_three_items() {
+        let src = "type Foo = { x: Int }\n\nfn make_foo(): Foo = Foo { x: 42 }\n\nfn main() = println(make_foo())";
+        let prog = parse_str(src).unwrap();
+        assert_eq!(prog.items.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_recursive_enum() {
+        let src = "type Tree =\n  | Leaf(Int)\n  | Node(Tree, Tree)";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TypeDecl(td) => {
+                assert_eq!(td.name, "Tree");
+                match &td.body {
+                    TypeBody::Enum(variants) => {
+                        assert_eq!(variants.len(), 2);
+                        assert_eq!(variants[0].name, "Leaf");
+                        assert_eq!(variants[1].name, "Node");
+                    }
+                    _ => panic!("Expected enum"),
+                }
+            }
+            _ => panic!("Expected type decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_const_declaration() {
+        let src = "let MAX: Int = 100";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Const(c) => {
+                assert_eq!(c.name, "MAX");
+            }
+            _ => panic!("Expected constant, got {:?}", prog.items[0]),
+        }
+    }
+
+    #[test]
+    fn test_parse_annotation_on_function() {
+        let src = "@[cfg(test)]\nfn test_fn() = 42";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert!(!f.annotations.is_empty());
+            }
+            _ => panic!("Expected annotated function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_error_no_equals() {
+        let result = parse_str("fn foo(x: Int) x + 1");
+        assert!(result.is_err(), "Missing = should fail");
+    }
+
+    #[test]
+    fn test_parse_error_unclosed_do() {
+        let result = parse_str("fn main() = do\n  let x = 1");
+        assert!(result.is_err(), "Missing end should fail");
+    }
+
+    #[test]
+    fn test_parse_unit_type_parens() {
+        let src = "fn noop(): () = ()";
+        let _result = parse_str(src); // Just ensure it doesn't crash
+    }
+
+    #[test]
+    fn test_parse_index_subscript() {
+        let src = "fn main() = list[0]";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                // Index access is compiled as a Call or special node
+                _ => {} // Just verify it parsed successfully
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_gte_operator() {
+        let src = "fn f(a: Int, b: Int) = a >= b";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::BinOp(_, BinOp::Ge, _) => {}
+                _ => panic!("Expected >= operator, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_operator() {
+        let src = "fn f(x: Bool) = not x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::UnaryOp(UnaryOp::Not, _) => {}
+                _ => panic!("Expected not operator, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_neg_operator() {
+        let src = "fn f(x: Int) = -x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::UnaryOp(UnaryOp::Neg, _) => {}
+                _ => panic!("Expected negate operator, got {:?}", f.body.kind),
             },
             _ => panic!("Expected function"),
         }
