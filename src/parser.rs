@@ -288,6 +288,8 @@ impl Parser {
             None
         };
 
+        let where_clauses = self.parse_optional_where_clauses()?;
+
         self.expect(&TokenKind::Eq)?;
         self.skip_newlines();
         let body = self.parse_function_body()?;
@@ -300,6 +302,7 @@ impl Parser {
             is_pub,
             is_async,
             type_params,
+            where_clauses,
             annotations: vec![],
             span,
         })
@@ -492,6 +495,11 @@ impl Parser {
     }
 
     fn parse_type_param(&mut self) -> Result<TypeParam, String> {
+        // Support lifetime parameters: 'a, 'b, etc.
+        if let TokenKind::Tick(lifetime) = self.peek().clone() {
+            self.advance();
+            return Ok(TypeParam { name: format!("'{lifetime}"), bounds: vec![] });
+        }
         let name = self.expect_upper_ident()?;
         let bounds = if self.at(&TokenKind::Colon) {
             self.advance();
@@ -505,6 +513,35 @@ impl Parser {
             vec![]
         };
         Ok(TypeParam { name, bounds })
+    }
+
+    fn parse_optional_where_clauses(&mut self) -> Result<Vec<WhereClause>, String> {
+        // Check for `where` keyword (parsed as an Ident, not a keyword token)
+        if let TokenKind::Ident(ref s) = self.peek().clone() {
+            if s == "where" {
+                self.advance();
+                let mut clauses = Vec::new();
+                loop {
+                    // Parse TypeName: Bound + Bound
+                    let type_name = self.expect_upper_ident()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let mut bounds = vec![self.expect_upper_ident()?];
+                    while self.at(&TokenKind::Plus) {
+                        self.advance();
+                        bounds.push(self.expect_upper_ident()?);
+                    }
+                    clauses.push(WhereClause { type_name, bounds });
+                    // Continue if comma-separated
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                return Ok(clauses);
+            }
+        }
+        Ok(vec![])
     }
 
     // ── Types ───────────────────────────────────────────────────────────────
@@ -525,17 +562,41 @@ impl Parser {
                 self.advance();
                 let vspan = self.span();
                 let vname = self.expect_upper_ident()?;
-                let fields = if self.at(&TokenKind::LParen) {
+                let (fields, named_fields) = if self.at(&TokenKind::LParen) {
                     self.advance();
                     let types = self.parse_type_list()?;
                     self.expect(&TokenKind::RParen)?;
-                    types
+                    (types, None)
+                } else if self.at(&TokenKind::LBrace) {
+                    // Struct-like variant: | Variant { name: Type, name2: Type2 }
+                    self.advance();
+                    self.skip_newlines();
+                    let mut nfields = Vec::new();
+                    while !self.at(&TokenKind::RBrace) {
+                        let fspan = self.span();
+                        let fname = self.expect_ident()?;
+                        self.expect(&TokenKind::Colon)?;
+                        let ftype = self.parse_type_expr()?;
+                        nfields.push(Field {
+                            name: fname,
+                            ty: ftype,
+                            is_pub: false,
+                            span: fspan,
+                        });
+                        if self.at(&TokenKind::Comma) {
+                            self.advance();
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(&TokenKind::RBrace)?;
+                    (Vec::new(), Some(nfields))
                 } else {
-                    Vec::new()
+                    (Vec::new(), None)
                 };
                 variants.push(Variant {
                     name: vname,
                     fields,
+                    named_fields,
                     span: vspan,
                 });
                 self.skip_newlines();
@@ -548,12 +609,19 @@ impl Parser {
             let mut fields = Vec::new();
             while !self.at(&TokenKind::RBrace) {
                 let fspan = self.span();
+                let is_pub = if self.at(&TokenKind::Pub) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let fname = self.expect_ident()?;
                 self.expect(&TokenKind::Colon)?;
                 let ftype = self.parse_type_expr()?;
                 fields.push(Field {
                     name: fname,
                     ty: ftype,
+                    is_pub,
                     span: fspan,
                 });
                 if self.at(&TokenKind::Comma) {
@@ -732,6 +800,7 @@ impl Parser {
                 return Ok(UseDecl {
                     path,
                     imports: Some(imports),
+                    alias: None,
                     span,
                 });
             }
@@ -746,9 +815,26 @@ impl Parser {
             path.push(segment);
         }
 
+        // Check for alias: `use Foo as Bar`
+        let alias = if self.at(&TokenKind::As) {
+            self.advance();
+            let alias_name = match self.peek().clone() {
+                TokenKind::UpperIdent(s) | TokenKind::Ident(s) => {
+                    let s = s.clone();
+                    self.advance();
+                    s
+                }
+                _ => return Err(format!("{} Expected alias name after 'as'", self.span())),
+            };
+            Some(alias_name)
+        } else {
+            None
+        };
+
         Ok(UseDecl {
             path,
             imports: None,
+            alias,
             span,
         })
     }
@@ -928,6 +1014,24 @@ impl Parser {
                     span,
                 })
             }
+            TokenKind::Star => {
+                let span = self.span();
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr {
+                    kind: ExprKind::UnaryOp(UnaryOp::Deref, Box::new(expr)),
+                    span,
+                })
+            }
+            TokenKind::Ampersand => {
+                let span = self.span();
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr {
+                    kind: ExprKind::UnaryOp(UnaryOp::Ref, Box::new(expr)),
+                    span,
+                })
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -1049,6 +1153,14 @@ impl Parser {
                     span,
                 })
             }
+            TokenKind::CharLit(c) => {
+                let c = c;
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::CharLit(c),
+                    span,
+                })
+            }
             TokenKind::Ident(ref s) => {
                 let s = s.clone();
                 self.advance();
@@ -1131,12 +1243,28 @@ impl Parser {
             TokenKind::Do => self.parse_do_block(),
             TokenKind::For => self.parse_for_loop(),
             TokenKind::While => self.parse_while_loop(),
+            TokenKind::Loop => self.parse_loop_expr(),
             TokenKind::Break => {
                 self.advance();
-                Ok(Expr {
-                    kind: ExprKind::Break,
-                    span,
-                })
+                // Check for break-with-value: break expr
+                // Only parse an expression if the next token could start one
+                // (not newline, end, pipe, etc.)
+                match self.peek() {
+                    TokenKind::Newline | TokenKind::End | TokenKind::Pipe
+                    | TokenKind::Eof | TokenKind::Else => {
+                        Ok(Expr {
+                            kind: ExprKind::Break,
+                            span,
+                        })
+                    }
+                    _ => {
+                        let value = self.parse_expr()?;
+                        Ok(Expr {
+                            kind: ExprKind::BreakValue(Box::new(value)),
+                            span,
+                        })
+                    }
+                }
             }
             TokenKind::Continue => {
                 self.advance();
@@ -1621,6 +1749,7 @@ impl Parser {
             type_params,
             methods,
             associated_types,
+            where_clauses: vec![],
             span,
         })
     }
@@ -1770,6 +1899,47 @@ impl Parser {
 
         Ok(Expr {
             kind: ExprKind::While(Box::new(cond), Box::new(body)),
+            span,
+        })
+    }
+
+    fn parse_loop_expr(&mut self) -> Result<Expr, String> {
+        let span = self.span();
+        self.expect(&TokenKind::Loop)?;
+        self.expect(&TokenKind::Do)?;
+        self.skip_newlines();
+
+        let mut stmts = Vec::new();
+        while !self.at(&TokenKind::End) && !self.at(&TokenKind::Eof) {
+            let stmt = self.parse_statement()?;
+            stmts.push(stmt);
+            self.skip_newlines();
+        }
+        self.expect(&TokenKind::End)?;
+
+        let body = if stmts.is_empty() {
+            Expr { kind: ExprKind::IntLit(0), span }
+        } else {
+            let last = stmts.pop().unwrap();
+            let final_expr = match last {
+                Stmt::Expr(e) => e,
+                other => {
+                    stmts.push(other);
+                    Expr { kind: ExprKind::IntLit(0), span }
+                }
+            };
+            if stmts.is_empty() {
+                final_expr
+            } else {
+                Expr {
+                    kind: ExprKind::Block(stmts, Box::new(final_expr)),
+                    span,
+                }
+            }
+        };
+
+        Ok(Expr {
+            kind: ExprKind::Loop(Box::new(body)),
             span,
         })
     }
@@ -3120,6 +3290,301 @@ mod tests {
             Item::Function(f) => match &f.body.kind {
                 ExprKind::UnaryOp(UnaryOp::Neg, _) => {}
                 _ => panic!("Expected negate operator, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_deref_operator() {
+        let src = "fn f(x: Int) = *x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::UnaryOp(UnaryOp::Deref, _) => {}
+                _ => panic!("Expected deref operator, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_ref_operator() {
+        let src = "fn f(x: Int) = &x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::UnaryOp(UnaryOp::Ref, _) => {}
+                _ => panic!("Expected ref operator, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_char_literal() {
+        let prog = parse_str("fn main() = 'a'").unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::CharLit('a') => {}
+                other => panic!("Expected CharLit('a'), got {:?}", other),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_char_literal_escape() {
+        let prog = parse_str(r"fn main() = '\n'").unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::CharLit('\n') => {}
+                other => panic!("Expected CharLit('\\n'), got {:?}", other),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    // ── Tests for new parser features ──────────────────────────────
+
+    #[test]
+    fn test_parse_where_clause_single() {
+        let src = "fn foo<T>(x: T): String where T: Display = x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert_eq!(f.name, "foo");
+                assert_eq!(f.where_clauses.len(), 1);
+                assert_eq!(f.where_clauses[0].type_name, "T");
+                assert_eq!(f.where_clauses[0].bounds, vec!["Display"]);
+            }
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_where_clause_multiple_bounds() {
+        let src = "fn foo<T>(x: T): String where T: Display + Clone = x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert_eq!(f.where_clauses.len(), 1);
+                assert_eq!(f.where_clauses[0].bounds, vec!["Display", "Clone"]);
+            }
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_where_clause_multiple_types() {
+        let src = "fn foo<T, U>(x: T, y: U) where T: Display, U: Clone = x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert_eq!(f.where_clauses.len(), 2);
+                assert_eq!(f.where_clauses[0].type_name, "T");
+                assert_eq!(f.where_clauses[1].type_name, "U");
+            }
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_no_where_clause() {
+        let src = "fn foo(x: Int) = x";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => {
+                assert!(f.where_clauses.is_empty());
+            }
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_like_variant() {
+        let src = "type Shape =\n  | Point\n  | Named { x: Int, y: Int }";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TypeDecl(td) => match &td.body {
+                TypeBody::Enum(variants) => {
+                    assert_eq!(variants.len(), 2);
+                    assert_eq!(variants[0].name, "Point");
+                    assert!(variants[0].named_fields.is_none());
+                    assert_eq!(variants[1].name, "Named");
+                    let nf = variants[1].named_fields.as_ref().unwrap();
+                    assert_eq!(nf.len(), 2);
+                    assert_eq!(nf[0].name, "x");
+                    assert_eq!(nf[1].name, "y");
+                    assert!(!nf[0].is_pub);
+                }
+                _ => panic!("Expected enum"),
+            },
+            _ => panic!("Expected type decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_variant_named_fields_empty_positional() {
+        let src = "type Msg =\n  | Hello { name: String }";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TypeDecl(td) => match &td.body {
+                TypeBody::Enum(variants) => {
+                    assert_eq!(variants[0].fields.len(), 0);
+                    assert!(variants[0].named_fields.is_some());
+                }
+                _ => panic!("Expected enum"),
+            },
+            _ => panic!("Expected type decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pub_struct_field() {
+        let src = "type Config = {\n  pub name: String,\n  secret: Int\n}";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TypeDecl(td) => match &td.body {
+                TypeBody::Struct(fields) => {
+                    assert_eq!(fields.len(), 2);
+                    assert!(fields[0].is_pub);
+                    assert_eq!(fields[0].name, "name");
+                    assert!(!fields[1].is_pub);
+                    assert_eq!(fields[1].name, "secret");
+                }
+                _ => panic!("Expected struct"),
+            },
+            _ => panic!("Expected type decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_fields_default_not_pub() {
+        let src = "type Point = {\n  x: Float,\n  y: Float\n}";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::TypeDecl(td) => match &td.body {
+                TypeBody::Struct(fields) => {
+                    assert!(!fields[0].is_pub);
+                    assert!(!fields[1].is_pub);
+                }
+                _ => panic!("Expected struct"),
+            },
+            _ => panic!("Expected type decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_use_alias() {
+        let src = "use Foo as Bar";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::UseDecl(u) => {
+                assert_eq!(u.path, vec!["Foo"]);
+                assert_eq!(u.alias, Some("Bar".to_string()));
+            }
+            _ => panic!("Expected use decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_use_no_alias() {
+        let src = "use Foo";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::UseDecl(u) => {
+                assert_eq!(u.path, vec!["Foo"]);
+                assert!(u.alias.is_none());
+            }
+            _ => panic!("Expected use decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_use_selective_has_no_alias() {
+        let src = "use Foo::{bar, baz}";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::UseDecl(u) => {
+                assert_eq!(u.path, vec!["Foo"]);
+                assert!(u.alias.is_none());
+                assert_eq!(u.imports, Some(vec!["bar".to_string(), "baz".to_string()]));
+            }
+            _ => panic!("Expected use decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_impl_block_has_where_clauses() {
+        let src = "type Foo = { x: Int }\n\nimpl Foo\n  fn get_x(self): Int = self.x\nend";
+        let prog = parse_str(src).unwrap();
+        let has_impl = prog.items.iter().find_map(|item| {
+            if let Item::ImplBlock(ib) = item { Some(ib) } else { None }
+        });
+        let ib = has_impl.expect("Should have impl block");
+        assert!(ib.where_clauses.is_empty());
+    }
+
+    #[test]
+    fn test_parse_loop_expr() {
+        let src = "fn main() = loop do\n  break\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Loop(_) => {}
+                _ => panic!("Expected loop expression, got {:?}", f.body.kind),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_loop_with_body() {
+        let src = "fn main() = loop do\n  let x = 1\n  break\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Loop(body) => match &body.kind {
+                    ExprKind::Block(stmts, _) => assert_eq!(stmts.len(), 1),
+                    _ => panic!("Expected block in loop body"),
+                },
+                _ => panic!("Expected loop expression"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_break_with_value() {
+        let src = "fn main() = loop do\n  break 42\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::Loop(body) => match &body.kind {
+                    ExprKind::BreakValue(val) => match &val.kind {
+                        ExprKind::IntLit(42) => {}
+                        _ => panic!("Expected IntLit(42)"),
+                    },
+                    _ => panic!("Expected break-with-value, got {:?}", body.kind),
+                },
+                _ => panic!("Expected loop expression"),
+            },
+            _ => panic!("Expected function"),
+        }
+    }
+
+    #[test]
+    fn test_parse_break_without_value() {
+        let src = "fn main() = while true do\n  break\nend";
+        let prog = parse_str(src).unwrap();
+        match &prog.items[0] {
+            Item::Function(f) => match &f.body.kind {
+                ExprKind::While(_, body) => match &body.kind {
+                    ExprKind::Break => {}
+                    _ => panic!("Expected plain break, got {:?}", body.kind),
+                },
+                _ => panic!("Expected while loop"),
             },
             _ => panic!("Expected function"),
         }

@@ -235,6 +235,7 @@ mod tests {
                 Item::UseDecl(UseDecl {
                     path: vec!["Math".to_string()],
                     imports: Some(vec!["square".to_string()]),
+                    alias: None,
                     span: Span::new(3, 1),
                 }),
             ],
@@ -312,6 +313,7 @@ mod tests {
                     is_pub: false,
                     is_async: false,
                     type_params: vec![],
+                    where_clauses: vec![],
                     annotations: vec![],
                     span: Span::new(1, 1),
                 }),
@@ -336,6 +338,7 @@ mod tests {
                 Item::UseDecl(UseDecl {
                     path: vec!["NonExistent".to_string()],
                     imports: None,
+                    alias: None,
                     span: Span::new(1, 1),
                 }),
             ],
@@ -361,11 +364,13 @@ mod tests {
                 Item::UseDecl(UseDecl {
                     path: vec!["Alpha".to_string()],
                     imports: None,
+                    alias: None,
                     span: Span::new(9, 1),
                 }),
                 Item::UseDecl(UseDecl {
                     path: vec!["Beta".to_string()],
                     imports: None,
+                    alias: None,
                     span: Span::new(10, 1),
                 }),
             ],

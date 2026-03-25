@@ -1415,3 +1415,302 @@ fn test_helper(): Int = 42"#;
     assert!(success);
     assert!(stdout.contains("#[cfg(test)]"));
 }
+
+// ── End-to-end compile + run tests ────────────────────────────────────
+
+/// Helper: write Star source to a temp file, compile it via `star build`, then run the binary.
+/// Returns (success, stdout, stderr) from the *run* step.
+fn compile_and_run(star_src: &str) -> (bool, String, String) {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tid = std::thread::current().id();
+    let dir = std::env::temp_dir().join("star_e2e_tests").join(format!("{:?}_{}", tid, id));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("main.star");
+    std::fs::write(&file, star_src).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_star");
+
+    // Build
+    let build_output = Command::new(bin)
+        .args(["build", file.to_str().unwrap()])
+        .current_dir(&dir)
+        .output()
+        .expect("Failed to run star build");
+
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&build_output.stdout).to_string();
+        return (false, stdout, format!("Build failed: {stderr}"));
+    }
+
+    // Run
+    let run_output = Command::new(bin)
+        .args(["run", file.to_str().unwrap()])
+        .current_dir(&dir)
+        .output()
+        .expect("Failed to run star run");
+
+    let success = run_output.status.success();
+    let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
+    (success, stdout, stderr)
+}
+
+#[test]
+fn test_e2e_hello_world() {
+    let (success, stdout, stderr) = compile_and_run(r#"fn main() = println("Hello from Star!")"#);
+    assert!(success, "Hello world should compile and run: {stderr}");
+    assert!(stdout.contains("Hello from Star!"), "Should print greeting: {stdout}");
+}
+
+#[test]
+fn test_e2e_arithmetic() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+fn add(a: Int, b: Int): Int = a + b
+fn main() = println(add(40, 2).to_string())
+"#);
+    assert!(success, "Arithmetic should work: {stderr}");
+    assert!(stdout.contains("42"), "Should compute 42: {stdout}");
+}
+
+#[test]
+fn test_e2e_pattern_matching() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+type Shape =
+  | Circle(Float)
+  | Rect(Float, Float)
+
+fn area(s: Shape): Float =
+  match s
+  | Circle(r) => 3.14 * r * r
+  | Rect(w, h) => w * h
+  end
+
+fn main() = println(area(Rect(3.0, 4.0)).to_string())
+"#);
+    assert!(success, "Pattern matching should work: {stderr}");
+    assert!(stdout.contains("12"), "Should compute area 12: {stdout}");
+}
+
+#[test]
+fn test_e2e_list_operations() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+fn main() =
+  let result = [1, 2, 3, 4, 5]
+    |> filter(fn(x) => x % 2 == 0)
+    |> map(fn(x) => x * 10)
+    |> fold(0, fn(acc, x) => acc + x)
+  println(result.to_string())
+"#);
+    assert!(success, "List ops should work: {stderr}");
+    assert!(stdout.contains("60"), "filter evens [2,4], *10 = [20,40], sum = 60: {stdout}");
+}
+
+#[test]
+fn test_e2e_string_interpolation() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+fn main() =
+  let name = "Star"
+  let version = 1
+  println("Hello #{name} v#{version}!")
+"#);
+    assert!(success, "String interpolation should work: {stderr}");
+    assert!(stdout.contains("Hello Star v1!"), "Should interpolate: {stdout}");
+}
+
+#[test]
+fn test_e2e_recursive_type() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+type Tree =
+  | Leaf(Int)
+  | Node(Tree, Tree)
+
+fn tree_sum(t: Tree): Int =
+  match t
+  | Leaf(n) => n
+  | Node(l, r) => tree_sum(l) + tree_sum(r)
+  end
+
+fn main() =
+  let t = Node(Node(Leaf(1), Leaf(2)), Leaf(3))
+  println(tree_sum(t).to_string())
+"#);
+    assert!(success, "Recursive types should work: {stderr}");
+    assert!(stdout.contains("6"), "Tree sum should be 6: {stdout}");
+}
+
+#[test]
+fn test_e2e_for_loop() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+fn main() = do
+  let mut total = 0
+  for x in [10, 20, 30] do
+    total += x
+  end
+  println(total.to_string())
+end
+"#);
+    assert!(success, "For loop should work: {stderr}");
+    assert!(stdout.contains("60"), "Sum should be 60: {stdout}");
+}
+
+#[test]
+fn test_e2e_struct_type() {
+    let (success, stdout, stderr) = compile_and_run(r#"
+type Point = { x: Float, y: Float }
+
+fn dist(p: Point): Float = sqrt(p.x * p.x + p.y * p.y)
+
+fn main() = println(dist(Point { x: 3.0, y: 4.0 }).to_string())
+"#);
+    assert!(success, "Struct types should work: {stderr}");
+    assert!(stdout.contains("5"), "Distance should be 5: {stdout}");
+}
+
+// ── CLI tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_version() {
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .arg("--version")
+        .output()
+        .expect("Failed to run star --version");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("star"), "Version output should contain 'star': {stdout}");
+}
+
+#[test]
+fn test_cli_help() {
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .arg("--help")
+        .output()
+        .expect("Failed to run star --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("build"), "Help should mention build: {stdout}");
+    assert!(stdout.contains("run"), "Help should mention run: {stdout}");
+    assert!(stdout.contains("check"), "Help should mention check: {stdout}");
+    assert!(stdout.contains("emit-rust"), "Help should mention emit-rust: {stdout}");
+    assert!(stdout.contains("fmt"), "Help should mention fmt: {stdout}");
+}
+
+#[test]
+fn test_cli_check() {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join("star_cli_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("check_{}.star", id));
+    std::fs::write(&file, r#"fn main() = println("ok")"#).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .expect("Failed to run star check");
+    assert!(output.status.success(), "check should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("OK"), "check should print OK: {stdout}");
+}
+
+#[test]
+fn test_cli_check_type_error() {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join("star_cli_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("check_err_{}.star", id));
+    std::fs::write(&file, r#"fn main(): Int = "not an int""#).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .expect("Failed to run star check");
+    assert!(!output.status.success(), "check should fail on type error");
+}
+
+#[test]
+fn test_cli_emit_rust() {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join("star_cli_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("emit_{}.star", id));
+    std::fs::write(&file, r#"fn add(a: Int, b: Int): Int = a + b"#).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .args(["emit-rust", file.to_str().unwrap()])
+        .output()
+        .expect("Failed to run star emit-rust");
+    assert!(output.status.success(), "emit-rust should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("fn add("), "Should emit Rust function: {stdout}");
+    assert!(stdout.contains("i64"), "Should use i64 for Int: {stdout}");
+}
+
+#[test]
+fn test_cli_fmt() {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join("star_cli_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("fmt_{}.star", id));
+    std::fs::write(&file, "fn   add(a:Int,b:Int):Int=a+b").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .args(["fmt", file.to_str().unwrap()])
+        .output()
+        .expect("Failed to run star fmt");
+    assert!(output.status.success(), "fmt should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    // Verify file was reformatted
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(content.contains("fn add"), "Formatted file should contain function: {content}");
+}
+
+#[test]
+fn test_cli_new_project() {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join("star_cli_tests").join(format!("new_{}", id));
+    // Clean up if exists
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let project_name = "test-project";
+
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .args(["new", project_name])
+        .current_dir(&dir)
+        .output()
+        .expect("Failed to run star new");
+    assert!(output.status.success(), "new should succeed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Verify project structure
+    assert!(dir.join(project_name).join("Star.toml").exists(), "Star.toml should exist");
+    assert!(dir.join(project_name).join("src/main.star").exists(), "src/main.star should exist");
+    assert!(dir.join(project_name).join(".gitignore").exists(), ".gitignore should exist");
+}
+
+#[test]
+fn test_cli_unknown_command() {
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .arg("nonexistent")
+        .output()
+        .expect("Failed to run star");
+    assert!(!output.status.success(), "Unknown command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Unknown command"), "Should say unknown command: {stderr}");
+}
+
+#[test]
+fn test_cli_no_args() {
+    let bin = env!("CARGO_BIN_EXE_star");
+    let output = Command::new(bin)
+        .output()
+        .expect("Failed to run star");
+    assert!(!output.status.success(), "No args should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Usage"), "Should show usage: {stderr}");
+}

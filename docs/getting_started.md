@@ -472,14 +472,393 @@ star fmt [file.star]         Format source code
 star new <name>              Create a new project
 star init                    Initialize project in current directory
 star clean                   Remove build artifacts
+star repl                    Start an interactive REPL session
+star lsp                     Start the Language Server Protocol server
 
 Options:
   --release                  Build in release mode
+  --watch                    Recompile on file changes (build/run)
   --filter <pattern>         Filter tests by name substring
   --verbose, -v              Verbose test output with timing
   -h, --help                 Show help
   -V, --version              Show version
 ```
+
+## The Pipe Operator
+
+The pipe operator `|>` is central to Star's style. It takes the result of the left-hand side and passes it as the first argument to the function on the right-hand side.
+
+### Basic Piping
+
+```star
+fn main() =
+  let result = "hello world"
+    |> uppercase()
+    |> split(" ")
+    |> head()
+  println(result)
+```
+
+Each step feeds into the next, reading top to bottom like a series of transformations.
+
+### Multi-Line Pipes
+
+Pipes work naturally across multiple lines. Star treats `|>` at the start of a line as a continuation of the previous expression:
+
+```star
+fn main() =
+  let stats = [4, 7, 2, 9, 1, 8, 3, 6, 5]
+    |> filter(fn(x) => x > 3)
+    |> sort()
+    |> map(fn(x) => x * 10)
+    |> reverse()
+  println(to_string(stats))
+```
+
+### Writing Pipe-Friendly Functions
+
+To work well with pipes, design functions so the "data" argument comes first:
+
+```star
+fn keep_above(items: List<Int>, threshold: Int): List<Int> =
+  filter(items, fn(x) => x > threshold)
+
+fn label(items: List<Int>, prefix: String): List<String> =
+  map(items, fn(x) => "#{prefix}: #{to_string(x)}")
+
+fn main() =
+  [1, 2, 3, 4, 5]
+    |> keep_above(3)
+    |> label("value")
+    |> each(fn(s) => println(s))
+```
+
+When `keep_above(3)` appears on the right side of `|>`, the piped list fills in the first argument, so it becomes `keep_above(list, 3)`.
+
+### Combining Pipes with Pattern Matching
+
+Pipes compose well with other Star features:
+
+```star
+fn classify(n: Int): String =
+  match n
+  | 0 => "zero"
+  | n when n > 0 => "positive"
+  | _ => "negative"
+  end
+
+fn main() =
+  [-3, 0, 5, -1, 7]
+    |> map(fn(x) => classify(x))
+    |> each(fn(s) => println(s))
+```
+
+## Module System
+
+Star supports both inline modules and external file modules. All modules use `pub` to control visibility.
+
+### Inline Modules
+
+Define a module directly in your source file with `module...end`:
+
+```star
+module StringUtils
+  pub fn shout(s: String): String =
+    uppercase(s)
+
+  pub fn whisper(s: String): String =
+    lowercase(s)
+end
+
+fn main() =
+  println(StringUtils::shout("hello"))
+  println(StringUtils::whisper("HELLO"))
+```
+
+Functions without `pub` are private to the module and cannot be called from outside.
+
+### External File Modules
+
+Split code across files by creating a separate `.star` file and importing it with `use`:
+
+```star
+# utils.star
+pub fn double(x: Int): Int = x * 2
+pub fn triple(x: Int): Int = x * 3
+```
+
+```star
+# main.star
+use Utils
+
+fn main() =
+  println(to_string(double(5)))
+  println(to_string(triple(5)))
+```
+
+The `use Utils` declaration looks for `utils.star` in the same directory (lowercased). All `pub` items from the module are brought into scope.
+
+### Pub Visibility
+
+Only `pub`-marked functions and types are accessible outside their module:
+
+```star
+module Auth
+  # Private — only callable within Auth
+  fn hash_password(pw: String): String =
+    sha256(pw)
+
+  # Public — callable from outside
+  pub fn create_user(name: String, pw: String): String =
+    "#{name}:#{hash_password(pw)}"
+end
+
+fn main() =
+  println(Auth::create_user("alice", "secret123"))
+  # Auth::hash_password("x")  -- this would be an error
+```
+
+### Nested Modules and Transitive Imports
+
+External modules can themselves `use` other modules. Star resolves these transitively and detects circular dependencies:
+
+```star
+# math.star
+pub fn square(x: Int): Int = x * x
+
+# geometry.star
+use Math
+pub fn circle_area(r: Float): Float = 3.14159 * to_float(square(to_int(r)))
+
+# main.star
+use Geometry
+fn main() =
+  println(to_string(circle_area(5.0)))
+```
+
+## Formatting
+
+The `star fmt` command automatically formats your Star source code with consistent indentation and style.
+
+### Usage
+
+Format a single file:
+
+```sh
+star fmt myfile.star
+```
+
+Format the entry point of a project (when a `Star.toml` is present):
+
+```sh
+star fmt
+```
+
+This reads `src/main.star`, parses it, and writes the formatted output back in place. Comments are preserved in their original positions.
+
+### What It Does
+
+The formatter normalizes:
+
+- Indentation (two spaces per level)
+- Spacing around operators and keywords
+- Blank lines between top-level items
+- Consistent formatting of `fn`, `type`, `match`, `if`, `do`, `module`, `trait`, and `impl` blocks
+
+It does not change the semantics of your code -- only whitespace and layout.
+
+### Integration Tips
+
+Run `star fmt` before committing to keep diffs clean. It pairs well with CI checks:
+
+```sh
+# In a CI script: format and check for differences
+star fmt src/main.star
+git diff --exit-code src/main.star
+```
+
+## Project Structure
+
+For larger Star projects, the recommended layout is:
+
+```
+my-project/
+  Star.toml            # Project manifest (name, version, dependencies)
+  Star.lock            # Lockfile for reproducible builds (auto-generated)
+  src/
+    main.star          # Entry point
+    utils.star         # Shared utilities (use Utils)
+    models.star        # Data types (use Models)
+  examples/
+    demo.star          # Example programs
+  tests/
+    math_test.star     # Test files
+  .gitignore           # Ignores .star-build/
+  .star-build/         # Build artifacts (auto-generated, gitignored)
+```
+
+### Star.toml
+
+The project manifest declares metadata and Rust crate dependencies:
+
+```toml
+[package]
+name = "my-project"
+version = "0.1.0"
+description = "A Star project"
+authors = ["Your Name"]
+license = "MIT"
+
+[dependencies]
+serde = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+```
+
+Dependencies listed here are Rust crates included in the generated `Cargo.toml`. Common crates like `regex`, `base64`, and `tokio` are auto-detected from your code and added without manual declaration.
+
+### Build Output
+
+All compilation artifacts go into `.star-build/`, which contains a generated Cargo project. This directory is created automatically and should be gitignored. Use `star clean` to remove it.
+
+### Creating a Project
+
+Use `star new` to scaffold a new project:
+
+```sh
+star new my-project
+cd my-project
+star run
+```
+
+Or initialize in an existing directory:
+
+```sh
+mkdir my-project && cd my-project
+star init
+```
+
+## REPL
+
+Star includes an interactive REPL (Read-Eval-Print Loop) for experimenting with expressions and building up code incrementally.
+
+### Starting the REPL
+
+```sh
+star repl
+```
+
+You will see a prompt where you can type expressions and definitions:
+
+```
+Star REPL v0.1.0
+Type expressions to evaluate. Commands: :quit, :reset, :history
+
+star>
+```
+
+### Evaluating Expressions
+
+Type any expression and it will be evaluated and printed automatically:
+
+```
+star> 1 + 2
+3
+star> "hello" |> uppercase()
+HELLO
+star> [1, 2, 3] |> map(fn(x) => x * x)
+[1, 4, 9]
+```
+
+Side-effect statements like `let` bindings and `println` calls are executed without extra printing:
+
+```
+star> let name = "Star"
+star> println("Hello, #{name}!")
+Hello, Star!
+```
+
+### Defining Functions and Types
+
+Top-level definitions persist across inputs within the session:
+
+```
+star> fn square(x: Int): Int = x * x
+star> square(7)
+49
+star> type Color = | Red | Blue | Green
+star> Red
+Red
+```
+
+### Multi-Line Input
+
+The REPL detects incomplete expressions automatically. Lines ending with `do`, `=`, open brackets, or commas continue on the next line:
+
+```
+star> fn factorial(n: Int): Int =
+  ...   if n <= 1 then 1
+  ...   else n * factorial(n - 1)
+  ...   end
+star> factorial(10)
+3628800
+```
+
+### REPL Commands
+
+| Command              | Description                            |
+|----------------------|----------------------------------------|
+| `:quit` or `:q`     | Exit the REPL                          |
+| `:reset`             | Clear all definitions and start fresh  |
+| `:history` or `:h`  | Show all inputs entered this session   |
+
+If an expression causes a compilation error, the REPL discards that input and lets you try again without losing previous definitions.
+
+## Watch Mode
+
+Watch mode automatically recompiles and reruns your program when source files change.
+
+### Usage
+
+```sh
+star run --watch
+star run myfile.star --watch
+star build --watch
+```
+
+### How It Works
+
+When `--watch` is active, Star:
+
+1. Compiles and runs your program immediately.
+2. Watches all `.star` files in the `src/` directory (and the directory of the entry file) plus `Star.toml`.
+3. When any watched file changes, clears the screen and recompiles.
+4. Continues watching until you press Ctrl+C.
+
+```
+[watch] Compiling...
+Hello, World!
+[watch] Watching for changes... (Ctrl+C to stop)
+```
+
+Edit a file, save, and the output updates automatically:
+
+```
+[watch] Recompiling...
+Hello, Star!
+[watch] Watching for changes... (Ctrl+C to stop)
+```
+
+### Combining with Release Mode
+
+You can combine `--watch` with `--release` for optimized rebuilds:
+
+```sh
+star run --watch --release
+```
+
+Watch mode works with both `star run` and `star build`. It does not apply to `star check`, `star test`, or other commands.
 
 ## Next Steps
 

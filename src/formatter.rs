@@ -150,6 +150,17 @@ impl<'a> Formatter<'a> {
             self.push(": ");
             self.format_type_expr(rt);
         }
+        if !func.where_clauses.is_empty() {
+            self.push(" where ");
+            for (i, wc) in func.where_clauses.iter().enumerate() {
+                if i > 0 {
+                    self.push(", ");
+                }
+                self.push(&wc.type_name);
+                self.push(": ");
+                self.push(&wc.bounds.join(" + "));
+            }
+        }
         self.push(" =");
         self.format_body(&func.body);
     }
@@ -170,7 +181,7 @@ impl<'a> Formatter<'a> {
                 self.write_indent();
                 self.pushln("end");
             }
-            ExprKind::If(..) | ExprKind::Match(..) | ExprKind::For(..) | ExprKind::While(..) => {
+            ExprKind::If(..) | ExprKind::Match(..) | ExprKind::For(..) | ExprKind::While(..) | ExprKind::Loop(..) => {
                 // These expressions already emit their own `end` keyword,
                 // so we just indent them without adding another `end`.
                 self.newline();
@@ -219,7 +230,21 @@ impl<'a> Formatter<'a> {
                         f.write_indent();
                         f.push("| ");
                         f.push(&v.name);
-                        if !v.fields.is_empty() {
+                        if let Some(named) = &v.named_fields {
+                            f.push(" { ");
+                            for (i, field) in named.iter().enumerate() {
+                                if i > 0 {
+                                    f.push(", ");
+                                }
+                                if field.is_pub {
+                                    f.push("pub ");
+                                }
+                                f.push(&field.name);
+                                f.push(": ");
+                                f.format_type_expr(&field.ty);
+                            }
+                            f.push(" }");
+                        } else if !v.fields.is_empty() {
                             f.push("(");
                             for (i, field) in v.fields.iter().enumerate() {
                                 if i > 0 {
@@ -238,6 +263,9 @@ impl<'a> Formatter<'a> {
                 for (i, field) in fields.iter().enumerate() {
                     if i > 0 {
                         self.push(", ");
+                    }
+                    if field.is_pub {
+                        self.push("pub ");
                     }
                     self.push(&field.name);
                     self.push(": ");
@@ -278,6 +306,10 @@ impl<'a> Formatter<'a> {
             self.push("::{");
             self.push(&imports.join(", "));
             self.push("}");
+        }
+        if let Some(alias) = &u.alias {
+            self.push(" as ");
+            self.push(alias);
         }
         self.newline();
     }
@@ -465,6 +497,18 @@ impl<'a> Formatter<'a> {
             ExprKind::BoolLit(b) => {
                 self.push(if *b { "true" } else { "false" });
             }
+            ExprKind::CharLit(c) => {
+                let escaped = match c {
+                    '\n' => "'\\n'".to_string(),
+                    '\t' => "'\\t'".to_string(),
+                    '\r' => "'\\r'".to_string(),
+                    '\\' => "'\\\\'".to_string(),
+                    '\'' => "'\\''".to_string(),
+                    '\0' => "'\\0'".to_string(),
+                    _ => format!("'{c}'"),
+                };
+                self.push(&escaped);
+            }
             ExprKind::ListLit(items) => {
                 self.push("[");
                 for (i, item) in items.iter().enumerate() {
@@ -507,6 +551,8 @@ impl<'a> Formatter<'a> {
                 match op {
                     UnaryOp::Neg => self.push("-"),
                     UnaryOp::Not => self.push("not "),
+                    UnaryOp::Deref => self.push("*"),
+                    UnaryOp::Ref => self.push("&"),
                 }
                 self.format_expr(operand);
             }
@@ -695,8 +741,17 @@ impl<'a> Formatter<'a> {
                 self.format_block_body(body);
                 self.pushln("end");
             }
+            ExprKind::Loop(body) => {
+                self.push("loop do");
+                self.format_block_body(body);
+                self.pushln("end");
+            }
             ExprKind::Break => {
                 self.push("break");
+            }
+            ExprKind::BreakValue(expr) => {
+                self.push("break ");
+                self.format_expr(expr);
             }
             ExprKind::Continue => {
                 self.push("continue");
@@ -924,6 +979,7 @@ mod tests {
                 is_async: false,
                 type_params: vec![],
                 annotations: vec![],
+                where_clauses: vec![],
                 span: span(),
             })],
         };
@@ -945,6 +1001,7 @@ mod tests {
                 is_async: true,
                 type_params: vec![],
                 annotations: vec![],
+                where_clauses: vec![],
                 span: span(),
             })],
         };
@@ -959,8 +1016,8 @@ mod tests {
                 name: "Option".to_string(),
                 type_params: vec![TypeParam::plain("T".to_string())],
                 body: TypeBody::Enum(vec![
-                    Variant { name: "Some".to_string(), fields: vec![TypeExpr::Named("T".to_string(), vec![])], span: span() },
-                    Variant { name: "None".to_string(), fields: vec![], span: span() },
+                    Variant { name: "Some".to_string(), fields: vec![TypeExpr::Named("T".to_string(), vec![])], named_fields: None, span: span() },
+                    Variant { name: "None".to_string(), fields: vec![], named_fields: None, span: span() },
                 ]),
                 span: span(),
             })],
@@ -976,8 +1033,8 @@ mod tests {
                 name: "Point".to_string(),
                 type_params: vec![],
                 body: TypeBody::Struct(vec![
-                    Field { name: "x".to_string(), ty: TypeExpr::Named("Int".to_string(), vec![]), span: span() },
-                    Field { name: "y".to_string(), ty: TypeExpr::Named("Int".to_string(), vec![]), span: span() },
+                    Field { name: "x".to_string(), ty: TypeExpr::Named("Int".to_string(), vec![]), is_pub: false, span: span() },
+                    Field { name: "y".to_string(), ty: TypeExpr::Named("Int".to_string(), vec![]), is_pub: false, span: span() },
                 ]),
                 span: span(),
             })],
@@ -1112,6 +1169,7 @@ mod tests {
             items: vec![Item::UseDecl(UseDecl {
                 path: vec!["Foo".to_string(), "Bar".to_string()],
                 imports: Some(vec!["baz".to_string(), "qux".to_string()]),
+                alias: None,
                 span: span(),
             })],
         };
@@ -1154,6 +1212,7 @@ mod tests {
                 is_async: false,
                 type_params: vec![],
                 annotations: vec![],
+                where_clauses: vec![],
                 span: span(),
             })],
         };
@@ -1235,9 +1294,11 @@ mod tests {
                     is_async: false,
                     type_params: vec![],
                     annotations: vec![],
+                    where_clauses: vec![],
                     span: span(),
                 }],
                 associated_types: vec![],
+                where_clauses: vec![],
                 span: span(),
             })],
         };
@@ -1320,6 +1381,7 @@ mod tests {
                 is_async: false,
                 type_params: vec![],
                 annotations: vec![],
+                where_clauses: vec![],
                 span: span(),
             })],
         };
@@ -1371,6 +1433,7 @@ mod tests {
                     is_async: false,
                     type_params: vec![],
                     annotations: vec![],
+                where_clauses: vec![],
                     span: span(),
                 })],
                 span: span(),

@@ -110,6 +110,8 @@ struct Infer {
     types: HashMap<String, TypeDef>,
     constructors: HashMap<String, CtorSig>,
     functions: HashMap<String, Scheme>,
+    /// Trait bounds per type variable: var_id → list of bound names (e.g., ["Clone", "Ord"])
+    var_bounds: HashMap<usize, Vec<String>>,
     scopes: Vec<HashMap<String, Type>>,
     builtins: HashMap<String, (usize, usize)>,
     errors: Vec<String>,
@@ -137,6 +139,7 @@ impl Infer {
             types: HashMap::new(),
             constructors: HashMap::new(),
             functions: HashMap::new(),
+            var_bounds: HashMap::new(),
             scopes: vec![HashMap::new()],
             builtins: Self::builtin_arities(),
             errors: Vec::new(),
@@ -253,7 +256,9 @@ impl Infer {
             ("dns_lookup", 1, 1), ("url_parse", 1, 1),
             ("http_get", 1, 1), ("http", 2, 3), ("http_with_headers", 4, 4),
             // Conversions
-            ("to_int", 1, 1), ("to_float", 1, 1), ("length", 1, 1),
+            ("to_int", 1, 1), ("to_float", 1, 1),
+            ("int_to_float", 1, 1), ("float_to_int", 1, 1),
+            ("length", 1, 1),
             // Process
             ("exit", 1, 1), ("panic", 1, 1),
             // Testing & debugging
@@ -268,6 +273,10 @@ impl Infer {
             // JSON
             ("json_get", 2, 2), ("json_object", 1, 1), ("json_array", 1, 1),
             ("json_escape", 1, 1), ("json_parse", 1, 1), ("json_encode", 1, 1),
+            // CSV
+            ("csv_parse", 1, 1), ("csv_encode", 1, 1),
+            // TOML
+            ("toml_parse", 1, 1), ("toml_encode", 1, 1),
             // Env file
             ("parse_env_string", 1, 1), ("load_env_file", 1, 1),
             // Colors & styling
@@ -400,6 +409,17 @@ impl Infer {
                     self.substitution[*id] = Some(Type::Error);
                     true
                 } else {
+                    // Propagate bounds: if this var has bounds and b is also a Var, transfer them
+                    if let Type::Var(b_id) = &b {
+                        if let Some(bounds) = self.var_bounds.get(id).cloned() {
+                            let existing = self.var_bounds.entry(*b_id).or_default();
+                            for bound in bounds {
+                                if !existing.contains(&bound) {
+                                    existing.push(bound);
+                                }
+                            }
+                        }
+                    }
                     self.substitution[*id] = Some(b);
                     true
                 }
@@ -409,6 +429,17 @@ impl Infer {
                     self.substitution[*id] = Some(Type::Error);
                     true
                 } else {
+                    // Propagate bounds: if this var has bounds and a is also a Var, transfer them
+                    if let Type::Var(a_id) = &a {
+                        if let Some(bounds) = self.var_bounds.get(id).cloned() {
+                            let existing = self.var_bounds.entry(*a_id).or_default();
+                            for bound in bounds {
+                                if !existing.contains(&bound) {
+                                    existing.push(bound);
+                                }
+                            }
+                        }
+                    }
                     self.substitution[*id] = Some(a);
                     true
                 }
@@ -975,12 +1006,17 @@ impl Infer {
                     },
                 );
                 for variant in variants {
+                    let field_types = if let Some(ref named) = variant.named_fields {
+                        named.iter().map(|f| f.ty.clone()).collect()
+                    } else {
+                        variant.fields.clone()
+                    };
                     self.constructors.insert(
                         variant.name.clone(),
                         CtorSig {
                             enum_name: td.name.clone(),
                             type_params: tp_names.clone(),
-                            field_types: variant.fields.clone(),
+                            field_types,
                         },
                     );
                 }
@@ -1018,6 +1054,10 @@ impl Infer {
             if let Type::Var(id) = var {
                 scheme_vars.push(id);
                 tparams.insert(tp.name.clone(), var);
+                // Store trait bounds for this type variable
+                if !tp.bounds.is_empty() {
+                    self.var_bounds.insert(id, tp.bounds.clone());
+                }
             }
         }
 
@@ -1054,6 +1094,7 @@ impl Infer {
             ExprKind::FloatLit(_) => Type::Float,
             ExprKind::StringLit(_) => Type::Str,
             ExprKind::BoolLit(_) => Type::Bool,
+            ExprKind::CharLit(_) => Type::Named("Char".to_string(), vec![]),
 
             ExprKind::StringInterp(parts) => {
                 for part in parts {
@@ -1191,6 +1232,14 @@ impl Infer {
                             ));
                         }
                         Type::Bool
+                    }
+                    UnaryOp::Deref => {
+                        // Trust rustc for the actual deref type
+                        self.fresh_var()
+                    }
+                    UnaryOp::Ref => {
+                        // Trust rustc for reference types
+                        self.fresh_var()
                     }
                 }
             }
@@ -1334,13 +1383,24 @@ impl Infer {
                     self.pop_scope();
                 }
 
-                // Exhaustiveness check: if scrutinee is a known enum, check all variants covered
+                // Exhaustiveness check
                 let resolved_scrut = self.apply(&scrut_ty);
+                let has_wildcard = arms.iter().any(|arm| self.pattern_has_wildcard(&arm.pattern));
+                // Note: arms with guards don't guarantee coverage, so treat guarded arms as non-covering
+                let has_unguarded_wildcard = arms.iter().any(|arm|
+                    arm.guard.is_none() && self.pattern_has_wildcard(&arm.pattern)
+                );
+
                 if let Type::Named(ref enum_name, _) = resolved_scrut {
                     if let Some(TypeDef::Enum { variants, .. }) = self.types.get(enum_name) {
-                        let has_wildcard = arms.iter().any(|arm| self.pattern_has_wildcard(&arm.pattern));
-                        if !has_wildcard {
+                        if !has_unguarded_wildcard {
+                            // Collect variants from unguarded arms (guarded arms don't guarantee coverage)
                             let covered: std::collections::HashSet<String> = arms.iter()
+                                .filter(|arm| arm.guard.is_none())
+                                .flat_map(|arm| self.collect_constructor_names(&arm.pattern))
+                                .collect();
+                            // Also count guarded constructor arms as covering if there's a guarded wildcard fallback
+                            let guarded_covered: std::collections::HashSet<String> = arms.iter()
                                 .flat_map(|arm| self.collect_constructor_names(&arm.pattern))
                                 .collect();
                             let missing: Vec<&String> = variants.iter()
@@ -1348,12 +1408,44 @@ impl Infer {
                                 .collect();
                             if !missing.is_empty() {
                                 let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-                                self.warnings.push((expr.span, format!(
-                                    "non-exhaustive match on `{}`. Missing variants: {}",
-                                    enum_name,
-                                    names.join(", "),
-                                )));
+                                // If all variants are covered but some only with guards, warn
+                                // If variants are completely missing, error
+                                let all_mentioned = guarded_covered.len() == variants.len() || has_wildcard;
+                                if all_mentioned {
+                                    self.warnings.push((expr.span, format!(
+                                        "match on `{}` may not be exhaustive: variants {} only covered by guarded arms",
+                                        enum_name,
+                                        names.join(", "),
+                                    )));
+                                } else {
+                                    self.errors.push(format!(
+                                        "{} Non-exhaustive match on `{}`. Missing variants: {}. Add a wildcard `| _ =>` arm or cover all variants",
+                                        expr.span,
+                                        enum_name,
+                                        names.join(", "),
+                                    ));
+                                }
                             }
+                        }
+                    }
+                } else if let Type::Bool = resolved_scrut {
+                    // Check Bool exhaustiveness
+                    if !has_unguarded_wildcard {
+                        let has_true = arms.iter().any(|arm|
+                            arm.guard.is_none() && self.pattern_is_bool(&arm.pattern, true)
+                        );
+                        let has_false = arms.iter().any(|arm|
+                            arm.guard.is_none() && self.pattern_is_bool(&arm.pattern, false)
+                        );
+                        if !has_true || !has_false {
+                            let mut missing = Vec::new();
+                            if !has_true { missing.push("true"); }
+                            if !has_false { missing.push("false"); }
+                            self.errors.push(format!(
+                                "{} Non-exhaustive match on Bool. Missing: {}. Add a wildcard `| _ =>` arm or cover all cases",
+                                expr.span,
+                                missing.join(", "),
+                            ));
                         }
                     }
                 }
@@ -1574,6 +1666,16 @@ impl Infer {
 
             ExprKind::Break | ExprKind::Continue => Type::Unit,
 
+            ExprKind::Loop(body) => {
+                self.infer_expr(body);
+                self.fresh_var() // loop with break can return any type
+            }
+
+            ExprKind::BreakValue(expr) => {
+                self.infer_expr(expr);
+                Type::Unit // break is a statement-like expression
+            }
+
             ExprKind::RustBlock(_) => self.fresh_var(),
 
             ExprKind::Try(inner) => {
@@ -1703,6 +1805,15 @@ impl Infer {
                 .collect(),
             Pattern::Bind(_, inner) => self.collect_constructor_names(inner),
             _ => vec![],
+        }
+    }
+
+    fn pattern_is_bool(&self, pattern: &Pattern, value: bool) -> bool {
+        match pattern {
+            Pattern::BoolLit(v) => *v == value,
+            Pattern::Or(pats) => pats.iter().any(|p| self.pattern_is_bool(p, value)),
+            Pattern::Bind(_, inner) => self.pattern_is_bool(inner, value),
+            _ => false,
         }
     }
 
@@ -2146,6 +2257,7 @@ mod tests {
             is_pub: false,
             is_async: false,
             type_params: vec![],
+            where_clauses: vec![],
             annotations: vec![],
             span: span(),
         }
@@ -2340,8 +2452,8 @@ mod tests {
             name: "Point".to_string(),
             type_params: vec![],
             body: TypeBody::Struct(vec![
-                Field { name: "x".to_string(), ty: int_ty(), span: span() },
-                Field { name: "y".to_string(), ty: int_ty(), span: span() },
+                Field { name: "x".to_string(), ty: int_ty(), is_pub: false, span: span() },
+                Field { name: "y".to_string(), ty: int_ty(), is_pub: false, span: span() },
             ]),
             span: span(),
         };
@@ -2369,8 +2481,8 @@ mod tests {
             name: "Point".to_string(),
             type_params: vec![],
             body: TypeBody::Struct(vec![
-                Field { name: "x".to_string(), ty: int_ty(), span: span() },
-                Field { name: "y".to_string(), ty: int_ty(), span: span() },
+                Field { name: "x".to_string(), ty: int_ty(), is_pub: false, span: span() },
+                Field { name: "y".to_string(), ty: int_ty(), is_pub: false, span: span() },
             ]),
             span: span(),
         };
@@ -2398,11 +2510,13 @@ mod tests {
                 Variant {
                     name: "Some".to_string(),
                     fields: vec![TypeExpr::Named("T".to_string(), vec![])],
+                    named_fields: None,
                     span: span(),
                 },
                 Variant {
                     name: "None".to_string(),
                     fields: vec![],
+                    named_fields: None,
                     span: span(),
                 },
             ]),
@@ -2593,6 +2707,7 @@ mod tests {
                 Variant {
                     name: "Circle".to_string(),
                     fields: vec![TypeExpr::Named("Float".to_string(), vec![])],
+                    named_fields: None,
                     span: span(),
                 },
             ]),
@@ -2875,6 +2990,7 @@ mod tests {
             type_params: vec![],
             methods: vec![], // Missing to_str!
             associated_types: vec![],
+            where_clauses: vec![],
             span: span(),
         });
         let program = Program { items: vec![trait_decl, impl_block] };
@@ -2911,6 +3027,7 @@ mod tests {
                 mk_expr(ExprKind::StringLit("foo".to_string())),
             )],
             associated_types: vec![],
+            where_clauses: vec![],
             span: span(),
         });
         let program = Program { items: vec![trait_decl, impl_block] };
@@ -2941,6 +3058,7 @@ mod tests {
             type_params: vec![],
             methods: vec![], // No methods — should be OK since describe has default
             associated_types: vec![],
+            where_clauses: vec![],
             span: span(),
         });
         let program = Program { items: vec![trait_decl, impl_block] };
@@ -2976,6 +3094,7 @@ mod tests {
                 mk_expr(ExprKind::IntLit(0)),
             )],
             associated_types: vec![],
+            where_clauses: vec![],
             span: span(),
         });
         let program = Program { items: vec![trait_decl, impl_block] };
@@ -3003,6 +3122,7 @@ mod tests {
                 is_pub: true,
                 is_async: false,
                 type_params: vec![],
+                where_clauses: vec![],
                 annotations: vec![],
                 span: span(),
             })],
@@ -3030,6 +3150,7 @@ mod tests {
                 is_pub: false,
                 is_async: false,
                 type_params: vec![],
+                where_clauses: vec![],
                 annotations: vec![],
                 span: span(),
             })],
@@ -3860,8 +3981,8 @@ mod tests {
             name: "Pair".to_string(),
             type_params: vec![],
             body: TypeBody::Struct(vec![
-                Field { name: "a".to_string(), ty: int_ty(), span: span() },
-                Field { name: "b".to_string(), ty: str_ty(), span: span() },
+                Field { name: "a".to_string(), ty: int_ty(), is_pub: false, span: span() },
+                Field { name: "b".to_string(), ty: str_ty(), is_pub: false, span: span() },
             ]),
             span: span(),
         };
@@ -3886,7 +4007,7 @@ mod tests {
             name: "Single".to_string(),
             type_params: vec![],
             body: TypeBody::Struct(vec![
-                Field { name: "x".to_string(), ty: int_ty(), span: span() },
+                Field { name: "x".to_string(), ty: int_ty(), is_pub: false, span: span() },
             ]),
             span: span(),
         };
@@ -3973,6 +4094,7 @@ mod tests {
                 Variant {
                     name: "Wrap".to_string(),
                     fields: vec![TypeExpr::Named("Int".to_string(), vec![])],
+                    named_fields: None,
                     span: span(),
                 },
             ]),
@@ -4169,7 +4291,7 @@ mod tests {
                     name: "Dog".to_string(),
                     type_params: vec![],
                     body: TypeBody::Struct(vec![
-                        Field { name: "name".to_string(), ty: str_ty(), span: span() },
+                        Field { name: "name".to_string(), ty: str_ty(), is_pub: false, span: span() },
                     ]),
                     span: span(),
                 }),
@@ -4198,10 +4320,12 @@ mod tests {
                         is_pub: false,
                         is_async: false,
                         type_params: vec![],
+                        where_clauses: vec![],
                         annotations: vec![],
                         span: span(),
                     }],
                     associated_types: vec![],
+                    where_clauses: vec![],
                     span: span(),
                 }),
             ],
@@ -4218,9 +4342,9 @@ mod tests {
             name: "Shape".to_string(),
             type_params: vec![],
             body: TypeBody::Enum(vec![
-                Variant { name: "Circle".to_string(), fields: vec![TypeExpr::Named("Float".to_string(), vec![])], span: span() },
-                Variant { name: "Rect".to_string(), fields: vec![TypeExpr::Named("Float".to_string(), vec![]), TypeExpr::Named("Float".to_string(), vec![])], span: span() },
-                Variant { name: "Point".to_string(), fields: vec![], span: span() },
+                Variant { name: "Circle".to_string(), fields: vec![TypeExpr::Named("Float".to_string(), vec![])], named_fields: None, span: span() },
+                Variant { name: "Rect".to_string(), fields: vec![TypeExpr::Named("Float".to_string(), vec![]), TypeExpr::Named("Float".to_string(), vec![])], named_fields: None, span: span() },
+                Variant { name: "Point".to_string(), fields: vec![], named_fields: None, span: span() },
             ]),
             span: span(),
         };
@@ -4266,5 +4390,178 @@ mod tests {
         };
         let result = check(program);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_char_literal_type() {
+        let mut infer = Infer::new();
+        assert_eq!(
+            infer.infer_expr(&mk_expr(ExprKind::CharLit('a'))),
+            Type::Named("Char".to_string(), vec![])
+        );
+    }
+
+    #[test]
+    fn test_exhaustive_match_errors_on_missing_variant() {
+        // type Color = | Red | Green | Blue
+        // match c | Red => 1 | Green => 2 end  (missing Blue)
+        let program = Program {
+            items: vec![
+                Item::TypeDecl(TypeDecl {
+                    name: "Color".to_string(),
+                    type_params: vec![],
+                    body: TypeBody::Enum(vec![
+                        Variant { name: "Red".to_string(), fields: vec![], named_fields: None, span: span() },
+                        Variant { name: "Green".to_string(), fields: vec![], named_fields: None, span: span() },
+                        Variant { name: "Blue".to_string(), fields: vec![], named_fields: None, span: span() },
+                    ]),
+                    span: span(),
+                }),
+                Item::Function(mk_fn(
+                    "main",
+                    vec![],
+                    None,
+                    mk_expr(ExprKind::Match(
+                        Box::new(mk_expr(ExprKind::Call(
+                            Box::new(mk_expr(ExprKind::Ident("Red".to_string()))),
+                            vec![],
+                        ))),
+                        vec![
+                            MatchArm {
+                                pattern: Pattern::Constructor("Red".to_string(), vec![]),
+                                guard: None,
+                                body: mk_expr(ExprKind::IntLit(1)),
+                                span: span(),
+                            },
+                            MatchArm {
+                                pattern: Pattern::Constructor("Green".to_string(), vec![]),
+                                guard: None,
+                                body: mk_expr(ExprKind::IntLit(2)),
+                                span: span(),
+                            },
+                        ],
+                    )),
+                )),
+            ],
+        };
+        let result = check(program);
+        assert!(result.is_err(), "Should error on non-exhaustive match");
+        let err = result.unwrap_err();
+        assert!(err.contains("Non-exhaustive"), "Error should mention non-exhaustive: {}", err);
+        assert!(err.contains("Blue"), "Error should mention missing variant Blue: {}", err);
+    }
+
+    #[test]
+    fn test_exhaustive_match_ok_with_wildcard() {
+        // match c | Red => 1 | _ => 0 end
+        let program = Program {
+            items: vec![
+                Item::TypeDecl(TypeDecl {
+                    name: "Color".to_string(),
+                    type_params: vec![],
+                    body: TypeBody::Enum(vec![
+                        Variant { name: "Red".to_string(), fields: vec![], named_fields: None, span: span() },
+                        Variant { name: "Green".to_string(), fields: vec![], named_fields: None, span: span() },
+                    ]),
+                    span: span(),
+                }),
+                Item::Function(mk_fn(
+                    "main",
+                    vec![],
+                    None,
+                    mk_expr(ExprKind::Match(
+                        Box::new(mk_expr(ExprKind::Call(
+                            Box::new(mk_expr(ExprKind::Ident("Red".to_string()))),
+                            vec![],
+                        ))),
+                        vec![
+                            MatchArm {
+                                pattern: Pattern::Constructor("Red".to_string(), vec![]),
+                                guard: None,
+                                body: mk_expr(ExprKind::IntLit(1)),
+                                span: span(),
+                            },
+                            MatchArm {
+                                pattern: Pattern::Wildcard,
+                                guard: None,
+                                body: mk_expr(ExprKind::IntLit(0)),
+                                span: span(),
+                            },
+                        ],
+                    )),
+                )),
+            ],
+        };
+        let result = check(program);
+        assert!(result.is_ok(), "Should pass with wildcard arm: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_exhaustive_match_all_variants_covered() {
+        let program = Program {
+            items: vec![
+                Item::TypeDecl(TypeDecl {
+                    name: "AB".to_string(),
+                    type_params: vec![],
+                    body: TypeBody::Enum(vec![
+                        Variant { name: "A".to_string(), fields: vec![], named_fields: None, span: span() },
+                        Variant { name: "B".to_string(), fields: vec![], named_fields: None, span: span() },
+                    ]),
+                    span: span(),
+                }),
+                Item::Function(mk_fn(
+                    "main",
+                    vec![],
+                    None,
+                    mk_expr(ExprKind::Match(
+                        Box::new(mk_expr(ExprKind::Call(
+                            Box::new(mk_expr(ExprKind::Ident("A".to_string()))),
+                            vec![],
+                        ))),
+                        vec![
+                            MatchArm {
+                                pattern: Pattern::Constructor("A".to_string(), vec![]),
+                                guard: None,
+                                body: mk_expr(ExprKind::IntLit(1)),
+                                span: span(),
+                            },
+                            MatchArm {
+                                pattern: Pattern::Constructor("B".to_string(), vec![]),
+                                guard: None,
+                                body: mk_expr(ExprKind::IntLit(2)),
+                                span: span(),
+                            },
+                        ],
+                    )),
+                )),
+            ],
+        };
+        let result = check(program);
+        assert!(result.is_ok(), "All variants covered should pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_trait_bounds_stored_for_type_params() {
+        let mut infer = Infer::new();
+        let f = Function {
+            name: "my_max".to_string(),
+            params: vec![
+                mk_param("a", Some(TypeExpr::Named("T".to_string(), vec![]))),
+                mk_param("b", Some(TypeExpr::Named("T".to_string(), vec![]))),
+            ],
+            return_type: Some(TypeExpr::Named("T".to_string(), vec![])),
+            body: mk_expr(ExprKind::Ident("a".to_string())),
+            is_pub: false,
+            is_async: false,
+            type_params: vec![TypeParam { name: "T".to_string(), bounds: vec!["Ord".to_string()] }],
+            where_clauses: vec![],
+            annotations: vec![],
+            span: span(),
+        };
+        infer.register_function(&f);
+        // Verify that var_bounds contains the Ord bound
+        assert!(!infer.var_bounds.is_empty(), "Should have stored bounds for type param");
+        let bounds: Vec<&Vec<String>> = infer.var_bounds.values().collect();
+        assert!(bounds.iter().any(|b| b.contains(&"Ord".to_string())), "Should contain Ord bound");
     }
 }

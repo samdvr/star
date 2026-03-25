@@ -55,8 +55,16 @@ pub struct Function {
     pub is_pub: bool,
     pub is_async: bool,
     pub type_params: Vec<TypeParam>,
+    pub where_clauses: Vec<WhereClause>,
     pub annotations: Vec<String>,  // e.g., ["cfg(target_os = \"linux\")"]
     pub span: Span,
+}
+
+/// A where clause: `T: Trait + Trait2`
+#[derive(Debug, Clone)]
+pub struct WhereClause {
+    pub type_name: String,
+    pub bounds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +96,7 @@ pub enum TypeBody {
 pub struct Variant {
     pub name: String,
     pub fields: Vec<TypeExpr>,
+    pub named_fields: Option<Vec<Field>>,  // Some for struct-like variants: | Variant { x: Int }
     pub span: Span,
 }
 
@@ -95,6 +104,7 @@ pub struct Variant {
 pub struct Field {
     pub name: String,
     pub ty: TypeExpr,
+    pub is_pub: bool,
     pub span: Span,
 }
 
@@ -125,6 +135,7 @@ pub enum ExprKind {
     FloatLit(f64),
     StringLit(String),
     BoolLit(bool),
+    CharLit(char),
     ListLit(Vec<Expr>),
 
     // Variables and paths
@@ -170,7 +181,9 @@ pub enum ExprKind {
     // Loops
     For(Pattern, Box<Expr>, Box<Expr>),    // for pattern in collection do body end
     While(Box<Expr>, Box<Expr>),           // while condition do body end
+    Loop(Box<Expr>),                       // loop do body end
     Break,
+    BreakValue(Box<Expr>),                 // break expr
     Continue,
 }
 
@@ -200,6 +213,8 @@ pub enum BinOp {
 pub enum UnaryOp {
     Neg,
     Not,
+    Deref, // *expr
+    Ref,   // &expr
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +273,7 @@ pub struct ModuleDecl {
 pub struct UseDecl {
     pub path: Vec<String>,
     pub imports: Option<Vec<String>>, // None = import all, Some = specific names
+    pub alias: Option<String>,        // use Foo as Bar
     pub span: Span,
 }
 
@@ -299,5 +315,6 @@ pub struct ImplBlock {
     pub type_params: Vec<TypeParam>,
     pub methods: Vec<Function>,
     pub associated_types: Vec<(String, TypeExpr)>, // type Name = ConcreteType
+    pub where_clauses: Vec<WhereClause>,
     pub span: Span,
 }

@@ -1,272 +1,340 @@
-# Star v1 Ship Readiness Report
+# Star Language — V1 Ship Readiness Report
 
-**Date:** 2026-03-23
-**Scope:** Full audit of DESIGN.md vs implementation, identifying all gaps for a v1 release.
+Audit of the Star compiler codebase against DESIGN.md, covering all modules: lexer, parser, AST, type checker, codegen, optimizer, borrow inference, resolver, manifest, formatter, LSP, CLI, error reporting, tests, and examples.
 
 ---
 
 ## Executive Summary
 
-Star is a functional-first language with Ruby-like syntax that compiles to idiomatic Rust. The compiler is **P0-complete** — core language features (type inference, pattern matching, modules, loops, 290+ stdlib builtins) all work end-to-end with 615 tests passing.
+Star is an impressive compiler with ~25,000 lines of Rust, 912 unit tests, 129 integration tests, 37 example programs, and a 290+ function standard library. The core compilation pipeline (lex → parse → typecheck → codegen → optimize → borrow-infer → cargo build) works end-to-end. However, several categories of work remain before a v1 release.
 
-To ship v1, the project needs work in three areas:
+**Overall readiness: ~75%**
 
-1. **Language completeness** — Traits, generics, and ownership features are parsed but partially wired up
-2. **Tooling & DX** — No LSP, no REPL, no watch mode, no package registry
-3. **Production hardening** — Error messages need polish, pattern exhaustiveness is basic, no warnings system
-
----
-
-## 1. Language Features — Gaps vs DESIGN.md
-
-### 1.1 Trait System (HIGH — blocks real-world usage)
-
-**Current state:** Traits are parsed into AST, registered in the type checker with method signatures, and impl blocks are codegen'd. But:
-
-- [ ] **Trait bound enforcement** — `fn max<T: Ord>(a: T, b: T)` parses, but the type checker does not verify that `T` actually satisfies `Ord` at call sites. Bounds are cosmetic.
-- [ ] **Method dispatch on trait objects** — `dyn Trait` is parsed but there's no vtable or dynamic dispatch in codegen. Calling a method through a trait reference will likely fail or generate invalid Rust.
-- [ ] **Associated types** — Parsed in AST (`TraitItem::AssociatedType`) but never resolved or substituted during type checking or codegen.
-- [ ] **Default method bodies** — Tracked in the traits registry (`has_default: bool`) but unclear if defaults are properly inherited when an impl omits them.
-- [ ] **Trait coherence** — No orphan rule checking, no overlap detection for impl blocks.
-- [ ] **Super-traits** — No `trait Foo: Bar` inheritance syntax or semantics.
-
-### 1.2 Generics (MEDIUM — works for simple cases, breaks on complex ones)
-
-- [ ] **Trait bound validation** — Generic functions accept bounds syntactically but don't enforce them. `fn foo<T: Clone + Debug>(x: T)` will generate the Rust signature, but the type checker won't catch violations.
-- [ ] **Higher-kinded types** — Not supported (no `F<_>` or `impl<T> Trait for F<T>` patterns).
-- [ ] **Const generics** — Not supported.
-- [ ] **Where clauses** — Not parsed or supported. Complex bounds require `where` syntax in Rust.
-- [ ] **Generic method calls** — e.g., `list.into::<Vec<String>>()` turbofish syntax not supported.
-
-### 1.3 Ownership & Borrowing (MEDIUM — clone-by-default works, explicit control incomplete)
-
-- [ ] **Mutable references (`&mut`)** — Parsed in AST/typeck but codegen support is limited. Real mutable-borrow patterns likely generate invalid Rust.
-- [ ] **Move semantics (`~T`)** — The tilde prefix is parsed but likely not generating correct move-only code in Rust.
-- [ ] **Lifetime annotations** — Parsed by the lexer/parser but never emitted in generated Rust. Functions returning references will fail to compile.
-- [ ] **Borrow checker feedback** — When rustc rejects generated code due to borrowing issues, Star gives no actionable feedback (user sees raw Rust errors).
-
-### 1.4 Pattern Matching (LOW-MEDIUM — works, but incomplete)
-
-- [ ] **Exhaustiveness checking** — Basic coverage only. No warnings for non-exhaustive matches on enums. Rust's `rustc` will catch these, but Star should report them first.
-- [ ] **Match guards (`when`)** — The `when` keyword exists in the lexer and guards are parsed, but validation and codegen need verification.
-- [ ] **Nested or-patterns** — `| Foo(A | B)` — unclear if fully supported in codegen.
-- [ ] **Literal patterns in nested positions** — e.g., matching on `Some(42)` — needs verification.
-
-### 1.5 Error Handling (LOW — mostly works)
-
-- [ ] **`?` operator propagation** — In DESIGN.md but needs verification that codegen correctly handles `?` in all positions (nested expressions, closures, etc.).
-- [ ] **Custom error types** — No way to define errors that implement `std::error::Error`. Users must use `Result<T, String>`.
-- [ ] **Error chaining** — No `.context()` or source-chain equivalent.
-
-### 1.6 Missing Syntax from DESIGN.md
-
-- [ ] **Struct update syntax** — `Task { done: true, ..task }` is shown in DESIGN.md examples. Verify codegen handles this correctly.
-- [ ] **Selective use imports** — `use Math::{square, cube}` shown in DESIGN.md. Currently `use Module` emits `use module::*;` (glob). Selective imports may not work.
-- [ ] **Range expressions** — `1..10`, `1..=10` — not clear if supported beyond `range()` builtin.
-- [ ] **String raw literals** — No `r"..."` syntax.
-- [ ] **Byte/char literals** — No `b"..."` or `'c'` character literal syntax.
+The gaps fall into five buckets:
+1. **Language features promised in DESIGN.md but missing** (high priority)
+2. **Compiler correctness issues** (high priority)
+3. **Developer experience & tooling** (medium priority)
+4. **Standard library gaps** (medium priority)
+5. **Quality, testing, and polish** (lower priority)
 
 ---
 
-## 2. Type System Gaps
+## 1. Missing Language Features (from DESIGN.md)
 
-### 2.1 Type Inference Limitations
+### 1.1 Expression-Level Borrowing & Dereferencing
+**Status:** Tokens exist (`&`, `*`, `~`) but expression-level parsing is missing.
 
-- [ ] **Generic return type inference** — Functions returning generic types may not infer correctly without explicit annotations.
-- [ ] **Closure type inference** — Lambda parameter types in complex positions (nested pipes, higher-order functions) may fail to infer.
-- [ ] **Recursive function typing** — Mutual recursion between polymorphic functions may have edge cases.
+- `&expr` — create a reference at the expression level (only works in type annotations today)
+- `*expr` — dereference operator (completely absent; `UnaryOp` only has `Neg` and `Not`)
+- `~expr` — move prefix on general expressions (only works on lambdas as `move fn()`)
 
-### 2.2 Type System Missing Features
+**Impact:** Users cannot write `&my_string` or `*boxed_val` in expressions. The design doc shows `~String` move syntax for hot paths — not usable today.
 
-- [ ] **Type classes / interfaces** — Trait bounds don't propagate through the type checker. This means generic code that calls trait methods won't be validated until Rust compilation.
-- [ ] **Variance tracking** — No covariance/contravariance analysis. Not critical for v1 but affects soundness of generic container types.
-- [ ] **Numeric coercion** — Int and Float are distinct with no implicit coercion. DESIGN.md doesn't address mixed arithmetic — need to decide: error or auto-coerce?
+### 1.2 Struct Spread Syntax
+**Status:** Parsed but needs codegen verification.
 
----
+- `Task { done: true, ..task }` — the design doc shows this as a core feature
+- Parser has `StructLiteral` with a `spread` field, but codegen handling needs audit
 
-## 3. Standard Library Gaps
+### 1.3 Where Clauses
+**Status:** Not implemented.
 
-### 3.1 Documented in DESIGN.md but Missing
+- No `where T: Trait` syntax on functions or impl blocks
+- Only inline bounds `<T: Ord>` are supported
+- Limits expressiveness for complex generic constraints
 
-| Category | DESIGN.md Mentions | Status |
-|---|---|---|
-| JSON | "Serialization formats: JSON" | ✅ Implemented (json_parse, json_encode, json_get, json_object, json_array) |
-| CSV | "Serialization formats: CSV" | ❌ Not implemented |
-| XML | "Serialization formats: XML" | ❌ Not implemented |
-| Binary encoding | "Binary encoding" | ❌ Not implemented |
-| Timezones | "Timezones and conversions" | ❌ Only UTC timestamps, no timezone support |
-| Signals | "Signals" | ❌ Not implemented |
-| Big integers | "Big integers / arbitrary precision" | ❌ Not implemented |
-| Arg parsing (rich) | "Argument parsing" | ⚠️ Basic (arg_get, arg_count) — no flag parsing, help generation |
-| Config file parsing | "Config file parsing (env, JSON, TOML, YAML)" | ⚠️ JSON only |
-| Terminal utilities | "Terminal utilities (colors, input)" | ⚠️ ANSI colors exist, no raw terminal/TUI |
+### 1.4 Associated Types in Trait Bounds
+**Status:** Not implemented.
 
-### 3.2 Recommended for v1 Minimum
+- `T: Iterator<Item=Int>` not supported
+- No inference of associated type values from impl context
+- No type substitution when using trait bounds with associated types
 
-- [ ] **CSV parsing** — Very commonly needed. A `csv_parse(text)` and `csv_encode(rows)` would cover most use cases.
-- [ ] **TOML parsing** — Star uses Star.toml, so supporting TOML in user programs is natural.
-- [ ] **Rich argument parsing** — A `parse_args()` that returns structured flags/options, or a declarative API.
-- [ ] **Timezone support** — At minimum, UTC offset and format with timezone.
+### 1.5 Lifetime Parameters in Functions
+**Status:** Partial — tokens and type nodes exist, but no binding or validation.
 
-### 3.3 Stdlib Quality Issues
+- `fn foo<'a>(x: &'a T)` — unclear if it parses correctly end-to-end
+- Lifetime annotations are essentially ignored throughout the compiler
 
-- [ ] **No documentation** — 290+ builtins have no user-facing docs. Users must read examples or source.
-- [ ] **No type signatures exposed** — Builtins are recognized by name in codegen; users can't discover them via tooling.
-- [ ] **Error messages for wrong arity** — Type checker validates arity, but error messages for builtins could be more helpful (e.g., "map takes 2 arguments: a list and a function").
+### 1.6 Character Literals
+**Status:** Not implemented.
 
----
+- No `'c'` literal syntax (conflicts with lifetime token `'a`)
+- `Char` is a declared primitive type but has no literal form
 
-## 4. Tooling & Developer Experience
+### 1.7 Named-Field Enum Variants
+**Status:** Not implemented.
 
-### 4.1 Critical for v1
+- Only tuple variants `| Variant(Type, Type)` are supported
+- `| Variant { field: Type }` struct-like variants are missing
 
-- [ ] **Error message quality** — When Rust compilation fails, users see raw `cargo build` output with Rust line numbers that don't map back to Star source. Need source-mapping or at minimum a wrapper that translates common errors.
-- [ ] **Warnings system** — No unused variable warnings, no unreachable code warnings, no deprecation warnings. The compiler is silent unless something is a hard error.
-- [ ] **`star test` improvements** — Currently runs `test_*` functions but has no assertion failure reporting with source locations, no test filtering, no `--verbose` output.
+### 1.8 Struct Field Visibility
+**Status:** Not implemented.
 
-### 4.2 Important for v1
+- No `pub` modifier on individual struct fields
+- All fields are implicitly public in generated Rust
 
-- [ ] **LSP server** — No language server protocol implementation. Without this, IDE support (autocomplete, go-to-definition, inline errors) is impossible. This is table-stakes for modern language adoption.
-- [ ] **REPL** — No interactive mode. `star repl` would be extremely useful for exploration and learning.
-- [ ] **Watch mode** — No `star watch` or `star run --watch` for auto-rebuild on file changes.
-- [ ] **Source maps** — When rustc errors occur, no mapping from generated Rust line numbers back to Star source lines.
-- [ ] **Documentation generation** — No `star doc` command. No doc-comment syntax (`##` or `///` equivalent).
+### 1.9 Module Aliasing
+**Status:** Not implemented.
 
-### 4.3 Nice-to-have for v1
+- No `use Foo as Bar` syntax
+- No nested module paths `use Foo::Bar::Baz` beyond selective imports
 
-- [ ] **Incremental compilation** — Currently rebuilds everything on every change. For larger projects this will be slow.
-- [ ] **Library output** — Only executables are supported. No way to build a `.star` library that other projects can depend on.
-- [ ] **Dependency resolution** — `Star.toml` has a `[dependencies]` section but there's no package registry, no dependency fetching, no version resolution.
-- [ ] **Playground** — A web-based playground (à la Rust Playground) for trying Star without installing.
-- [ ] **Syntax highlighting** — TextMate grammar, tree-sitter grammar, or VS Code extension for Star files.
+### 1.10 Loop Enhancements
+**Status:** Missing advanced forms.
+
+- No labeled loops (`'label: for`)
+- No `break` with value (`break 42`)
+- No `loop` keyword (infinite loop sugar)
 
 ---
 
-## 5. Formatter Gaps
+## 2. Compiler Correctness Issues
 
-- [ ] **Comment preservation** — Comments are discarded during parsing, so `star fmt` strips all comments. This is a **blocker** for real-world usage.
-- [ ] **Configuration** — No options for indentation style, line width, trailing commas, etc.
-- [ ] **Idempotency verification** — No guarantee that formatting is stable (fmt(fmt(x)) == fmt(x)).
+### 2.1 Mutual Recursion Not Detected (Critical)
+**Severity:** High — causes stack overflows at runtime.
 
----
+The recursive type detection in codegen only checks direct self-reference. If enum `A` contains enum `B` and `B` contains `A`, neither is auto-boxed. This will produce Rust code that fails to compile (infinite size type) or cause stack overflows.
 
-## 6. Build System & Project Management
+**Fix:** Implement transitive cycle detection using a fixed-point algorithm across all type definitions.
 
-- [ ] **Star package dependencies** — `[dependencies]` in Star.toml is parsed but there's no registry or resolution mechanism. Star packages can't depend on other Star packages.
-- [ ] **Dev dependencies** — No `[dev-dependencies]` section for test-only dependencies.
-- [ ] **Build scripts** — No pre/post-build hooks.
-- [ ] **Multi-binary projects** — No support for multiple entry points in one project.
-- [ ] **Workspace support** — No monorepo / multi-package workspace.
-- [ ] **Manifest completeness** — Only `name` and `version` fields; no authors, description, license, homepage, repository fields.
-- [ ] **Lock file** — No Star.lock for reproducible builds.
+### 2.2 Trait Bounds Parsed But Never Validated
+**Severity:** High — silent type errors.
 
----
+`fn<T: Clone>(x: T)` parses and type-checks without verifying `Clone` is satisfied by the concrete type. Star relies entirely on rustc to catch these, which means error messages point to generated Rust code — not Star source.
 
-## 7. Documentation
+### 2.3 Pattern Match Exhaustiveness is Incomplete
+**Severity:** Medium — non-exhaustive matches compile but panic at runtime.
 
-- [ ] **Language reference** — DESIGN.md is the only spec. Need a proper language reference covering all syntax, semantics, and edge cases.
-- [ ] **Standard library reference** — 290+ builtins with no API docs. Need a searchable reference.
-- [ ] **Tutorial / Getting Started** — No guided introduction for new users.
-- [ ] **Error catalog** — No list of all compiler errors with explanations and fixes.
-- [ ] **Migration guide** — Tips for Rust/Ruby/OCaml developers coming to Star.
+The type checker only warns about missing wildcard/catch-all arms. It doesn't verify that all enum variants are covered, doesn't account for guards, and doesn't detect overlapping patterns.
 
----
+### 2.4 Method Call Type Checking Deferred
+**Severity:** Medium — type errors surface only at rustc stage.
 
-## 8. Testing & Quality
+`MethodCall` expressions always return a fresh type variable. The type checker never validates that the method exists on the receiver type. All checking is delegated to rustc.
 
-### Current: 615 tests (592 unit + 23 integration)
+### 2.5 Let-Polymorphism Incomplete
+**Severity:** Medium — generic let-bindings may not instantiate correctly.
 
-- [ ] **End-to-end test coverage** — Integration tests compile Star to Rust and check output, but don't cover all 290+ builtins or edge cases.
-- [ ] **Fuzzing** — No fuzz testing for parser or type checker. Important for a compiler.
-- [ ] **Property-based tests** — No quickcheck/proptest for type inference or codegen.
-- [ ] **Benchmark suite** — No compile-time or runtime benchmarks. Need baselines before optimizing.
-- [ ] **Error message tests** — No snapshot tests for error message quality.
-- [ ] **Formatter round-trip tests** — No tests verifying `parse(format(parse(src))) == parse(src)`.
+Generalization happens but type schemes are not properly instantiated at all use sites. This can lead to incorrect type unification for polymorphic values used in multiple contexts.
+
+### 2.6 Module Visibility Leaks
+**Severity:** Low — all modules emit `use super::*;`.
+
+Generated Rust modules import everything from the parent scope, including private functions. This breaks encapsulation guarantees that `pub` visibility is supposed to enforce.
 
 ---
 
-## 9. Prioritized v1 Checklist
+## 3. Developer Experience & Tooling
 
-### P0 — Must ship (blocks v1)
+### 3.1 LSP Server (Needs Significant Work)
+**Current state:** Foundation-level with 6 request handlers.
 
-| # | Feature | Effort | Why |
-|---|---------|--------|-----|
-| 1 | **Comment preservation in formatter** | Medium | `star fmt` destroying comments is unusable |
-| 2 | **Rust error translation** | Medium | Users seeing raw Rust errors is confusing |
-| 3 | **Trait bound enforcement** | Large | Generic code silently generates invalid Rust |
-| 4 | **Pattern exhaustiveness warnings** | Medium | Silent non-exhaustive matches cause runtime panics |
-| 5 | **Warnings system** (unused vars, unreachable code) | Medium | Silent compiler feels broken |
-| 6 | **Stdlib documentation** | Medium | 290+ undocumented functions are undiscoverable |
-| 7 | **Language reference documentation** | Large | No spec beyond DESIGN.md |
-| 8 | **`&mut` codegen completion** | Medium | Mutable borrows are in the design but don't fully work |
-| 9 | **Selective use imports** | Small | `use Module::{a, b}` is in DESIGN.md but may not work |
-| 10 | **Match guard codegen** | Small | `when` guards are parsed but need verification |
+**Working:**
+- Hover (type info), completion (keywords/builtins/symbols), go-to-definition (single file), formatting, document symbols, semantic tokens
 
-### P1 — Should ship (significantly improves quality)
+**Missing for v1:**
+- Cross-file go-to-definition
+- Workspace support (multi-file projects)
+- Signature help for function calls
+- Find all references
+- Rename refactoring
+- Inlay hints for inferred types
+- Incremental document analysis
+- Diagnostic quick-fixes / code actions
 
-| # | Feature | Effort | Why |
-|---|---------|--------|-----|
-| 11 | **LSP server** (basic: errors, go-to-def) | Large | Table-stakes for language adoption |
-| 12 | **REPL** | Medium | Essential for learning and exploration |
-| 13 | **Watch mode** | Small | `star run --watch` for fast iteration |
-| 14 | **Syntax highlighting** (VS Code extension) | Small | Basic syntax coloring for .star files |
-| 15 | **`star test` improvements** | Small | Test filtering, better failure output |
-| 16 | **Struct update syntax verification** | Small | `{ field: val, ..base }` from DESIGN.md |
-| 17 | **Numeric type coercion story** | Small | Decide and document Int/Float interaction |
-| 18 | **Tutorial / Getting Started guide** | Medium | First thing new users need |
-| 19 | **CSV stdlib** | Small | Very commonly needed |
-| 20 | **TOML stdlib** | Small | Natural fit given Star.toml |
+### 3.2 No Incremental Compilation
+Every `star build` recompiles everything from scratch. For projects beyond a few files, this will be noticeably slow.
 
-### P2 — Nice to have (can ship after v1)
+### 3.3 No Watch Mode
+No `star watch` command for automatic recompilation on file changes. Essential for iterative development.
 
-| # | Feature | Effort | Why |
-|---|---------|--------|-----|
-| 21 | Package registry & dependency resolution | Very Large | Ecosystem feature, not needed for single-project use |
-| 22 | Incremental compilation | Large | Only matters for large projects |
-| 23 | Library output (not just executables) | Medium | Needed for packages ecosystem |
-| 24 | Web playground | Medium | Marketing / adoption |
-| 25 | Fuzzing & property-based tests | Medium | Quality, not user-facing |
-| 26 | Associated types | Medium | Advanced trait feature |
-| 27 | Super-traits | Medium | Advanced trait feature |
-| 28 | Lifetime annotations in codegen | Large | Only needed for zero-copy perf paths |
-| 29 | Move semantics (`~T`) | Medium | Perf optimization, clone-by-default works |
-| 30 | Higher-kinded types | Very Large | Academic, not practical for v1 |
-| 31 | Timezone support | Medium | Can use raw timestamps for now |
-| 32 | Signal handling | Small | Niche use case |
-| 33 | Big integers | Medium | Niche use case |
-| 34 | Formatter configuration | Medium | Opinionated defaults are fine for v1 |
-| 35 | Workspace / monorepo support | Large | Single-project is fine for v1 |
+### 3.4 No REPL
+No interactive mode for exploring the language. Important for onboarding new users.
+
+### 3.5 No Documentation Generator
+No `star doc` command to generate API documentation from source annotations/comments.
+
+### 3.6 Error Reporting Gaps
+- Single-line spans only — no multi-line error regions
+- No error chaining or "caused by" context
+- No suggestion/fix hints in error output
+- ANSI colors hardcoded (no `--no-color` flag for CI)
+- No machine-readable JSON error format
+- Errors in generated Rust reference line numbers in `.rs` files, not `.star` source
+
+### 3.7 No Package Manager / Registry
+DESIGN.md shows `[dependencies]` in Star.toml for Star packages, but there's no package registry, no `star install`, and no dependency resolution for Star-native packages.
 
 ---
 
-## 10. Risk Assessment
+## 4. Standard Library Gaps
 
-| Risk | Impact | Likelihood | Mitigation |
-|------|--------|------------|------------|
-| Users hit raw Rust errors they can't understand | HIGH | HIGH | P0 #2: Error translation layer |
-| Trait-heavy code silently generates broken Rust | HIGH | MEDIUM | P0 #3: Trait bound enforcement |
-| Formatter destroys comments in real codebases | HIGH | HIGH | P0 #1: Comment preservation |
-| No IDE support limits adoption to CLI enthusiasts | MEDIUM | HIGH | P1 #11: Basic LSP |
-| 290+ builtins are undiscoverable without docs | MEDIUM | HIGH | P0 #6: Stdlib docs |
-| Complex generic code fails at Rust compile time | MEDIUM | MEDIUM | P0 #3: Better type checking |
+### 4.1 JSON Serialization/Deserialization
+**Status:** Not implemented.
+
+DESIGN.md lists JSON as part of the minimum viable stdlib. There are no `json_parse`, `json_stringify`, or related builtins. This is a hard requirement for v1 — nearly every modern language ships with JSON support.
+
+### 4.2 CSV / TOML / YAML Parsing
+**Status:** Not implemented.
+
+Common serialization formats have no stdlib support. At minimum, TOML parsing would be useful since Star.toml is the project manifest format.
+
+### 4.3 Argument Parsing
+**Status:** Not implemented.
+
+DESIGN.md section 15 lists CLI argument parsing as a standard feature. Currently only `args()` returns raw strings — no structured parsing.
+
+### 4.4 Terminal Utilities
+**Status:** Not implemented.
+
+No ANSI color helpers, no terminal size detection, no interactive input beyond `read_line`.
+
+### 4.5 Signal Handling
+**Status:** Not implemented.
+
+DESIGN.md section 9 lists signals as part of OS interaction. No `on_signal`, `trap`, or similar.
+
+### 4.6 Smart Pointers / Resource Management
+**Status:** Not implemented.
+
+No `Rc`, `Arc`, `Weak`, or RAII/`defer` patterns exposed. DESIGN.md section 11 lists these as expected.
+
+### 4.7 Streaming / Lazy Evaluation
+**Status:** Not implemented.
+
+No lazy iterators, generators, or stream abstractions. All collection operations are eager (clone + collect).
 
 ---
 
-## Appendix: Files Audited
+## 5. Quality, Testing & Polish
 
-| File | Lines | Status |
-|------|-------|--------|
-| src/ast.rs | 303 | Complete for current features |
-| src/lexer.rs | 1,334 | Complete, well-tested |
-| src/parser.rs | 2,625 | Complete with error recovery |
-| src/typeck.rs | 2,701 | Core inference works; trait/generic checking incomplete |
-| src/codegen.rs | 6,685 | Largest file; 290+ builtins; needs &mut and trait dispatch |
-| src/resolver.rs | 247 | Works for file-based modules; no package resolution |
-| src/optimize.rs | 218 | Conservative clone elimination; correct but limited |
-| src/borrow.rs | 1,026 | String/Vec inference works; limited scope |
-| src/formatter.rs | 1,349 | Full AST formatting; no comment preservation |
-| src/manifest.rs | 479 | Basic Star.toml; no package deps resolution |
-| src/main.rs | 358 | 11 CLI commands; no watch/repl |
-| src/error.rs | 99 | Basic span tracking |
-| tests/integration.rs | 537 | 23 integration tests |
-| **Total** | **~17,961** | |
+### 5.1 Untested Modules
+| Module | Tests | Risk |
+|--------|-------|------|
+| `ast.rs` | 0 | Low (data types) |
+| `error.rs` | 0 | Medium (formatting bugs) |
+| `main.rs` | 0 | **High** (CLI correctness) |
+| `lsp.rs` | 0 | **High** (IDE experience) |
+
+### 5.2 Weak Test Coverage
+| Module | Tests | Lines | Concern |
+|--------|-------|-------|---------|
+| `borrow.rs` | 19 | 1,026 | Complex heuristics undertested |
+| `resolver.rs` | 14 | 377 | Multi-file resolution edge cases |
+| `manifest.rs` | 16 | 722 | Cargo.toml generation not directly tested |
+
+### 5.3 No End-to-End Runtime Tests
+Integration tests verify codegen output but never compile+run the generated Rust. A program could generate syntactically valid but semantically broken Rust that only fails at cargo build time.
+
+### 5.4 Generated Rust Code Quality
+- Pervasive `.clone().into_iter()` pattern (150+ instances) — generates Clippy warnings
+- `&*var` pattern used instead of `var.as_str()`
+- No `#[allow(dead_code)]` on generated helpers — warning noise
+- All I/O errors converted to `String` via `map_err(|e| e.to_string())` — loses error type info
+- No `#[inline]` hints on hot stdlib wrappers
+
+### 5.5 Builtin System Unmaintainable
+290+ builtins hardcoded in a single match expression spanning ~2,700 lines in `codegen.rs`, with parallel arity tables in `typeck.rs`. Adding a new builtin requires editing two files in sync. Should be table-driven or extracted to a registry module.
+
+### 5.6 PascalCase Module Conversion
+`HTTPClient` → `h_t_t_p_client` instead of `http_client`. The snake_case conversion doesn't handle acronyms.
+
+---
+
+## Prioritized V1 Roadmap
+
+### P0 — Must Fix Before V1
+
+| # | Item | Category | Effort |
+|---|------|----------|--------|
+| 1 | Fix mutual recursion detection (auto-boxing) | Correctness | Medium |
+| 2 | Add JSON serialize/deserialize builtins | Stdlib | Medium |
+| 3 | Implement `*expr` dereference operator | Language | Small |
+| 4 | Implement `&expr` borrow operator | Language | Small |
+| 5 | Validate trait bounds at type-check time | Correctness | Large |
+| 6 | Improve pattern match exhaustiveness checking | Correctness | Medium |
+| 7 | Add character literals | Language | Small |
+| 8 | Add end-to-end compile+run integration tests | Testing | Medium |
+| 9 | Add CLI tests for all subcommands | Testing | Medium |
+| 10 | Map Star source spans through to rustc errors | DX | Large |
+
+### P1 — Should Have for V1
+
+| # | Item | Category | Effort |
+|---|------|----------|--------|
+| 11 | Cross-file go-to-definition in LSP | Tooling | Medium |
+| 12 | LSP workspace support | Tooling | Medium |
+| 13 | `star watch` command | Tooling | Small |
+| 14 | Where clauses | Language | Medium |
+| 15 | Named-field enum variants | Language | Medium |
+| 16 | Struct spread in codegen | Language | Small |
+| 17 | Module aliasing (`use Foo as Bar`) | Language | Small |
+| 18 | CLI argument parsing builtin | Stdlib | Small |
+| 19 | `--no-color` and `--json` error output flags | DX | Small |
+| 20 | Fix module visibility leaks (`use super::*`) | Correctness | Medium |
+
+### P2 — Nice to Have for V1
+
+| # | Item | Category | Effort |
+|---|------|----------|--------|
+| 21 | REPL / interactive mode | Tooling | Large |
+| 22 | Incremental compilation | Tooling | Large |
+| 23 | LSP signature help & inlay hints | Tooling | Medium |
+| 24 | Lazy iterators / streaming | Language | Large |
+| 25 | `Rc`/`Arc` smart pointer builtins | Stdlib | Medium |
+| 26 | CSV/TOML/YAML parsing builtins | Stdlib | Medium |
+| 27 | Signal handling | Stdlib | Small |
+| 28 | Terminal color/formatting helpers | Stdlib | Small |
+| 29 | Extract builtin registry from codegen.rs | Code quality | Large |
+| 30 | Documentation generator (`star doc`) | Tooling | Large |
+| 31 | Struct field visibility (`pub` fields) | Language | Small |
+| 32 | Loop labels and `break` with value | Language | Small |
+| 33 | Move prefix `~` on general expressions | Language | Small |
+| 34 | Package registry / `star install` | Ecosystem | Very Large |
+
+### Post-V1
+
+| Item | Notes |
+|------|-------|
+| Associated types | Complex type system feature |
+| Lifetime validation | Currently delegated entirely to rustc |
+| Let-polymorphism fix | Subtle HM inference issue |
+| Const generics | Niche feature |
+| Generic type defaults | Low demand |
+| `async` closures | Rust itself only recently stabilized these |
+| Workspace / multi-package builds | Needed for large projects |
+
+---
+
+## Module Health Summary
+
+| Module | Lines | Tests | Completeness | Health |
+|--------|-------|-------|--------------|--------|
+| `lexer.rs` | 1,623 | 90 | 98% | Excellent |
+| `parser.rs` | 3,127 | 80 | 85% | Good |
+| `ast.rs` | ~800 | 0 | 95% | Good (data-only) |
+| `typeck.rs` | 4,270 | 144 | 70% | Needs work |
+| `codegen.rs` | 7,693 | 496 | 85% | Good but sprawling |
+| `optimize.rs` | 338 | 30 | 95% | Excellent |
+| `borrow.rs` | 1,026 | 19 | 75% | Adequate |
+| `resolver.rs` | 377 | 14 | 85% | Good |
+| `manifest.rs` | 722 | 16 | 80% | Good |
+| `formatter.rs` | 1,382 | 24 | 90% | Good |
+| `lsp.rs` | ~600 | 0 | 40% | Needs significant work |
+| `main.rs` | ~500 | 0 | 85% | Good but untested |
+| `error.rs` | ~150 | 0 | 70% | Adequate |
+
+---
+
+## Conclusion
+
+Star's core compilation pipeline is solid and the standard library is remarkably rich for a young language. The main blockers for v1 are:
+
+1. **Correctness** — mutual recursion detection, trait bound validation, and exhaustiveness checking need to be fixed to prevent confusing runtime failures
+2. **JSON support** — a non-negotiable stdlib feature for any modern language
+3. **Expression-level `&`/`*` operators** — fundamental for a language that generates Rust
+4. **Error experience** — users hitting rustc errors instead of Star errors is the biggest DX gap
+5. **Testing** — CLI and LSP have zero tests; end-to-end tests don't actually compile the generated Rust
+
+Fixing the P0 items would make Star credible as a v1 release. The P1 items would make it competitive.

@@ -1,0 +1,28 @@
+{
+  "name": "star-lang",
+  "displayName": "Star Language",
+  "description": "Syntax highlighting for the Star programming language",
+  "version": "0.1.0",
+  "publisher": "star-lang",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "star",
+        "aliases": ["Star", "star"],
+        "extensions": [".star"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "star",
+        "scopeName": "source.star",
+        "path": "./syntaxes/star.tmLanguage.json"
+      }
+    ]
+  }
+}

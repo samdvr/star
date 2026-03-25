@@ -167,6 +167,118 @@ impl CodeGen {
         "\n"
     );
 
+    /// Inline CSV parser/encoder emitted into generated code.
+    const CSV_HELPER: &str = concat!(
+        "fn _star_csv_parse(input: &str) -> Vec<Vec<String>> { ",
+        "let mut rows: Vec<Vec<String>> = Vec::new(); ",
+        "let mut row: Vec<String> = Vec::new(); ",
+        "let mut field = String::new(); ",
+        "let mut in_quotes = false; ",
+        "let bytes = input.as_bytes(); let len = bytes.len(); let mut i = 0; ",
+        "while i < len { ",
+        "if in_quotes { ",
+        "if bytes[i] == b'\"' { if i + 1 < len && bytes[i + 1] == b'\"' { field.push('\"'); i += 2; } else { in_quotes = false; i += 1; } } ",
+        "else { field.push(bytes[i] as char); i += 1; } ",
+        "} else { ",
+        "match bytes[i] { ",
+        "b'\"' => { in_quotes = true; i += 1; } ",
+        "b',' => { row.push(std::mem::take(&mut field)); i += 1; } ",
+        "b'\\r' => { if i + 1 < len && bytes[i + 1] == b'\\n' { i += 1; } ",
+        "row.push(std::mem::take(&mut field)); rows.push(std::mem::take(&mut row)); i += 1; } ",
+        "b'\\n' => { row.push(std::mem::take(&mut field)); rows.push(std::mem::take(&mut row)); i += 1; } ",
+        "c => { field.push(c as char); i += 1; } } } } ",
+        "if !field.is_empty() || !row.is_empty() { row.push(field); rows.push(row); } ",
+        "rows } ",
+        "fn _star_csv_encode(rows: &[Vec<String>]) -> String { ",
+        "let mut out = String::new(); ",
+        "for row in rows { ",
+        "for (i, field) in row.iter().enumerate() { ",
+        "if i > 0 { out.push(','); } ",
+        "if field.contains(',') || field.contains('\"') || field.contains('\\n') || field.contains('\\r') { ",
+        "out.push('\"'); out.push_str(&field.replace('\"', \"\\\"\\\"\")); out.push('\"'); ",
+        "} else { out.push_str(field); } } out.push('\\n'); } out } ",
+        "\n"
+    );
+
+    /// Inline TOML parser/encoder emitted into generated code.
+    const TOML_HELPER: &str = concat!(
+        "#[derive(Clone, Debug)] ",
+        "enum _StarToml { Str(String), Int(i64), Float(f64), Bool(bool), Array(Vec<_StarToml>), Table(Vec<(String, _StarToml)>) } ",
+        "impl std::fmt::Display for _StarToml { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { ",
+        "_StarToml::Str(s) => write!(f, \"\\\"{}\\\"\", s.replace('\\\\', \"\\\\\\\\\").replace('\"', \"\\\\\\\"\")), ",
+        "_StarToml::Int(n) => write!(f, \"{}\", n), ",
+        "_StarToml::Float(n) => { if *n == (*n as i64) as f64 && !n.is_nan() && !n.is_infinite() { write!(f, \"{}.0\", *n as i64) } else { write!(f, \"{}\", n) } } ",
+        "_StarToml::Bool(b) => write!(f, \"{}\", b), ",
+        "_StarToml::Array(arr) => { write!(f, \"[\")?; for (i, v) in arr.iter().enumerate() { if i > 0 { write!(f, \", \")?; } write!(f, \"{}\", v)?; } write!(f, \"]\") } ",
+        "_StarToml::Table(pairs) => { write!(f, \"{{\")?; for (i, (k, v)) in pairs.iter().enumerate() { if i > 0 { write!(f, \", \")?; } write!(f, \"\\\"{}\\\": {}\", k, v)?; } write!(f, \"}}\") } ",
+        "} } } ",
+        "fn _star_toml_parse_impl(input: &str) -> Result<Vec<(String, _StarToml)>, String> { ",
+        "let mut root: Vec<(String, _StarToml)> = Vec::new(); ",
+        "let mut current_table: Option<String> = None; ",
+        "let mut tables: std::collections::HashMap<String, Vec<(String, _StarToml)>> = std::collections::HashMap::new(); ",
+        "for line in input.lines() { ",
+        "let trimmed = line.trim(); ",
+        "if trimmed.is_empty() || trimmed.starts_with('#') { continue; } ",
+        "if trimmed.starts_with('[') && !trimmed.starts_with(\"[[\") { ",
+        "let name = trimmed.trim_start_matches('[').trim_end_matches(']').trim().to_string(); ",
+        "current_table = Some(name.clone()); ",
+        "tables.entry(name).or_insert_with(Vec::new); ",
+        "continue; } ",
+        "if let Some((key, val)) = trimmed.split_once('=') { ",
+        "let key = key.trim().trim_matches('\"').to_string(); ",
+        "let val = val.trim(); ",
+        "let parsed = _star_toml_parse_value(val)?; ",
+        "match &current_table { ",
+        "Some(t) => { tables.entry(t.clone()).or_insert_with(Vec::new).push((key, parsed)); } ",
+        "None => { root.push((key, parsed)); } } } } ",
+        "for (name, entries) in tables { root.push((name, _StarToml::Table(entries))); } ",
+        "Ok(root) } ",
+        "fn _star_toml_parse(input: &str) -> Result<String, String> { ",
+        "let root = _star_toml_parse_impl(input)?; ",
+        "Ok(format!(\"{}\", _StarToml::Table(root))) } ",
+        "fn _star_toml_parse_value(val: &str) -> Result<_StarToml, String> { ",
+        "let val = val.trim(); ",
+        "if val == \"true\" { return Ok(_StarToml::Bool(true)); } ",
+        "if val == \"false\" { return Ok(_StarToml::Bool(false)); } ",
+        "if (val.starts_with('\"') && val.ends_with('\"')) || (val.starts_with('\\'') && val.ends_with('\\'')) { ",
+        "return Ok(_StarToml::Str(val[1..val.len()-1].replace(\"\\\\n\", \"\\n\").replace(\"\\\\\\\"\", \"\\\"\").to_string())); } ",
+        "if val.starts_with('[') && val.ends_with(']') { ",
+        "let inner = val[1..val.len()-1].trim(); ",
+        "if inner.is_empty() { return Ok(_StarToml::Array(Vec::new())); } ",
+        "let mut arr = Vec::new(); let mut depth = 0i32; let mut start = 0; ",
+        "for (i, c) in inner.char_indices() { match c { '[' | '{' => depth += 1, ']' | '}' => depth -= 1, ',' if depth == 0 => { arr.push(_star_toml_parse_value(&inner[start..i])?); start = i + 1; } _ => {} } } ",
+        "arr.push(_star_toml_parse_value(&inner[start..])?); ",
+        "return Ok(_StarToml::Array(arr)); } ",
+        "if val.starts_with('{') && val.ends_with('}') { ",
+        "let inner = val[1..val.len()-1].trim(); ",
+        "if inner.is_empty() { return Ok(_StarToml::Table(Vec::new())); } ",
+        "let mut pairs = Vec::new(); ",
+        "for part in inner.split(',') { ",
+        "if let Some((k, v)) = part.split_once('=') { ",
+        "pairs.push((k.trim().trim_matches('\"').to_string(), _star_toml_parse_value(v)?)); } } ",
+        "return Ok(_StarToml::Table(pairs)); } ",
+        "if val.contains('.') { if let Ok(f) = val.parse::<f64>() { return Ok(_StarToml::Float(f)); } } ",
+        "if let Ok(n) = val.parse::<i64>() { return Ok(_StarToml::Int(n)); } ",
+        "Err(format!(\"cannot parse TOML value: {}\", val)) } ",
+        "fn _star_toml_encode_value(v: &_StarToml) -> String { match v { ",
+        "_StarToml::Str(s) => format!(\"\\\"{}\\\"\", s.replace('\\\\', \"\\\\\\\\\").replace('\"', \"\\\\\\\"\")), ",
+        "_StarToml::Int(n) => format!(\"{}\", n), ",
+        "_StarToml::Float(f) => format!(\"{}\", f), ",
+        "_StarToml::Bool(b) => format!(\"{}\", b), ",
+        "_StarToml::Array(arr) => { let parts: Vec<String> = arr.iter().map(|v| _star_toml_encode_value(v)).collect(); format!(\"[{}]\", parts.join(\", \")) } ",
+        "_StarToml::Table(pairs) => { let parts: Vec<String> = pairs.iter().map(|(k, v)| format!(\"{} = {}\", k, _star_toml_encode_value(v))).collect(); format!(\"{{{}}}\", parts.join(\", \")) } } } ",
+        "fn _star_toml_encode(input: &str) -> String { ",
+        "let root = match _star_toml_parse_impl(input) { Ok(r) => r, Err(_) => return String::new() }; ",
+        "let mut out = String::new(); let mut sub_tables: Vec<(String, Vec<(String, _StarToml)>)> = Vec::new(); ",
+        "for (k, v) in &root { match v { ",
+        "_StarToml::Table(inner) => sub_tables.push((k.clone(), inner.clone())), ",
+        "_ => { out.push_str(&k); out.push_str(\" = \"); out.push_str(&_star_toml_encode_value(v)); out.push('\\n'); } } } ",
+        "for (k, inner) in &sub_tables { ",
+        "out.push('\\n'); out.push('['); out.push_str(k); out.push_str(\"]\\n\"); ",
+        "for (ik, iv) in inner { out.push_str(ik); out.push_str(\" = \"); out.push_str(&_star_toml_encode_value(iv)); out.push('\\n'); } } out } ",
+        "\n"
+    );
+
     fn new() -> Self {
         let builtins: HashSet<&'static str> = [
             // I/O
@@ -264,7 +376,7 @@ impl CodeGen {
             "http_get",
             "http", "http_with_headers",
             // Conversions
-            "to_int", "to_float",
+            "to_int", "to_float", "int_to_float", "float_to_int",
             // Utility
             "length",
             // Process
@@ -279,6 +391,10 @@ impl CodeGen {
             "arg_get", "arg_count", "arg_has", "arg_value", "arg_pairs",
             "json_get", "json_object", "json_array", "json_escape",
             "json_parse", "json_encode",
+            // CSV
+            "csv_parse", "csv_encode",
+            // TOML
+            "toml_parse", "toml_encode",
             "parse_env_string", "load_env_file",
             "color_red", "color_green", "color_blue", "color_yellow",
             "color_cyan", "color_magenta",
@@ -365,28 +481,96 @@ impl CodeGen {
     }
 
     fn detect_recursive_types(&mut self, program: &Program) {
+        // Step 1: Collect all enum type declarations
+        let mut enum_decls: Vec<&TypeDecl> = Vec::new();
+        let mut enum_names: HashSet<String> = HashSet::new();
         for item in &program.items {
             if let Item::TypeDecl(td) = item {
-                self.check_type_recursion(td);
+                if let TypeBody::Enum(_) = &td.body {
+                    enum_decls.push(td);
+                    enum_names.insert(td.name.clone());
+                }
             }
             if let Item::ModuleDecl(m) = item {
                 for item in &m.items {
                     if let Item::TypeDecl(td) = item {
-                        self.check_type_recursion(td);
+                        if let TypeBody::Enum(_) = &td.body {
+                            enum_decls.push(td);
+                            enum_names.insert(td.name.clone());
+                        }
                     }
                 }
             }
         }
+
+        // Step 2: Build dependency graph — for each enum, which other enums appear in its fields
+        let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+        for td in &enum_decls {
+            let mut referred = HashSet::new();
+            if let TypeBody::Enum(variants) = &td.body {
+                for variant in variants {
+                    for field in &variant.fields {
+                        for name in &enum_names {
+                            if self.type_refers_to(field, name) {
+                                referred.insert(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            deps.insert(td.name.clone(), referred);
+        }
+
+        // Step 3: Find all types participating in cycles via reachability (DFS)
+        let mut cycle_participants: HashSet<String> = HashSet::new();
+        for name in &enum_names {
+            // Check if `name` can reach itself through the dependency graph
+            let mut visited = HashSet::new();
+            let mut stack = Vec::new();
+            // Start from the neighbors of `name` (not `name` itself)
+            if let Some(neighbors) = deps.get(name) {
+                for n in neighbors {
+                    stack.push(n.clone());
+                }
+            }
+            while let Some(current) = stack.pop() {
+                if &current == name {
+                    // Found a cycle back to `name`
+                    cycle_participants.insert(name.clone());
+                    break;
+                }
+                if visited.contains(&current) {
+                    continue;
+                }
+                visited.insert(current.clone());
+                if let Some(neighbors) = deps.get(&current) {
+                    for n in neighbors {
+                        stack.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        // Step 4: For each cycle participant, mark fields that reference other cycle participants
+        for td in &enum_decls {
+            if !cycle_participants.contains(&td.name) {
+                continue;
+            }
+            self.check_type_recursion(td, &cycle_participants);
+        }
     }
 
-    fn check_type_recursion(&mut self, td: &TypeDecl) {
+    fn check_type_recursion(&mut self, td: &TypeDecl, cycle_members: &HashSet<String>) {
         if let TypeBody::Enum(variants) = &td.body {
             let mut variant_map: HashMap<String, HashSet<usize>> = HashMap::new();
             for variant in variants {
                 let mut boxed_fields = HashSet::new();
                 for (fi, field) in variant.fields.iter().enumerate() {
-                    if self.type_refers_to(field, &td.name) {
-                        boxed_fields.insert(fi);
+                    for member in cycle_members {
+                        if self.type_refers_to(field, member) {
+                            boxed_fields.insert(fi);
+                            break;
+                        }
                     }
                 }
                 if !boxed_fields.is_empty() {
@@ -658,12 +842,15 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
 
-        match &u.imports {
-            Some(imports) => {
+        match (&u.imports, &u.alias) {
+            (Some(imports), _) => {
                 let names = imports.join(", ");
                 self.line(&format!("use {path}::{{{names}}};"));
             }
-            None => {
+            (None, Some(alias)) => {
+                self.line(&format!("use {path} as {alias};"));
+            }
+            (None, None) => {
                 self.line(&format!("use {path}::*;"));
             }
         }
@@ -672,6 +859,8 @@ impl CodeGen {
     // ── Types ───────────────────────────────────────────────────────────────
 
     fn emit_type_decl(&mut self, td: &TypeDecl) {
+        // Emit source location comment for error mapping
+        self.line(&format!("// @star:{}:{}", td.span.line, td.span.col));
         let type_params = fmt_type_params(&td.type_params);
 
         match &td.body {
@@ -680,7 +869,18 @@ impl CodeGen {
                 self.line(&format!("enum {}{} {{", td.name, type_params));
                 self.indent();
                 for variant in variants {
-                    if variant.fields.is_empty() {
+                    if let Some(named_fields) = &variant.named_fields {
+                        // Struct-like variant: VariantName { field1: Type1, field2: Type2 }
+                        let fields: Vec<String> = named_fields
+                            .iter()
+                            .map(|f| {
+                                let ty = self.type_to_rust(&f.ty, &td.name);
+                                let vis = if f.is_pub { "pub " } else { "" };
+                                format!("{vis}{}: {ty}", f.name)
+                            })
+                            .collect();
+                        self.line(&format!("{} {{ {} }},", variant.name, fields.join(", ")));
+                    } else if variant.fields.is_empty() {
                         self.line(&format!("{},", variant.name));
                     } else {
                         let fields: Vec<String> = variant
@@ -708,7 +908,8 @@ impl CodeGen {
                 self.indent();
                 for field in fields {
                     let ty = self.type_to_rust(&field.ty, &td.name);
-                    self.line(&format!("{}: {},", field.name, ty));
+                    let vis = if field.is_pub { "pub " } else { "" };
+                    self.line(&format!("{vis}{}: {},", field.name, ty));
                 }
                 self.dedent();
                 self.line("}");
@@ -923,7 +1124,15 @@ impl CodeGen {
         } else {
             format!("impl{type_params} {}", imp.type_name)
         };
-        self.line(&format!("{target} {{"));
+        let where_clause = if imp.where_clauses.is_empty() {
+            String::new()
+        } else {
+            let clauses: Vec<String> = imp.where_clauses.iter().map(|wc| {
+                format!("{}: {}", wc.type_name, wc.bounds.join(" + "))
+            }).collect();
+            format!(" where {}", clauses.join(", "))
+        };
+        self.line(&format!("{target}{where_clause} {{"));
         self.indent();
         // Emit associated type definitions
         for (name, ty) in &imp.associated_types {
@@ -1006,6 +1215,8 @@ impl CodeGen {
     // ── Functions ───────────────────────────────────────────────────────────
 
     fn emit_function(&mut self, f: &Function) {
+        // Emit source location comment for error mapping
+        self.line(&format!("// @star:{}:{}", f.span.line, f.span.col));
         // Emit annotations (e.g., #[cfg(...)])
         for ann in &f.annotations {
             self.line(&format!("#[{ann}]"));
@@ -1041,8 +1252,17 @@ impl CodeGen {
             .map(|t| format!(" -> {}", self.type_to_rust(t, "")))
             .unwrap_or_default();
 
+        let where_clause = if f.where_clauses.is_empty() {
+            String::new()
+        } else {
+            let clauses: Vec<String> = f.where_clauses.iter().map(|wc| {
+                format!("{}: {}", wc.type_name, wc.bounds.join(" + "))
+            }).collect();
+            format!(" where {}", clauses.join(", "))
+        };
+
         self.line(&format!(
-            "{vis}{async_kw}fn {}{type_params}({params}){ret} {{",
+            "{vis}{async_kw}fn {}{type_params}({params}){ret}{where_clause} {{",
             f.name,
             params = params.join(", ")
         ));
@@ -1055,6 +1275,8 @@ impl CodeGen {
     }
 
     fn emit_main_function(&mut self, f: &Function) {
+        // Emit source location comment for error mapping
+        self.line(&format!("// @star:{}:{}", f.span.line, f.span.col));
         if f.is_async {
             self.line("#[tokio::main]");
             self.line("async fn main() {");
@@ -3002,13 +3224,29 @@ impl CodeGen {
 
             // ── Conversions ─────────────────────────────────────────────
             "to_int" if args.len() == 1 => {
+                // Polymorphic: i64 as-is, f64 cast, String parse (via Any downcast)
+                self.push("{ use std::any::Any; let _v: &dyn Any = &(");
                 self.emit_expr(&args[0]);
-                self.push(".parse::<i64>().unwrap_or(0)");
+                self.push("); if let Some(n) = _v.downcast_ref::<i64>() { *n } else if let Some(f) = _v.downcast_ref::<f64>() { *f as i64 } else if let Some(s) = _v.downcast_ref::<String>() { s.parse::<i64>().unwrap_or(0) } else { 0i64 } }");
                 true
             }
             "to_float" if args.len() == 1 => {
+                // Polymorphic: f64 as-is, i64 cast, String parse (via Any downcast)
+                self.push("{ use std::any::Any; let _v: &dyn Any = &(");
                 self.emit_expr(&args[0]);
-                self.push(".parse::<f64>().unwrap_or(0.0)");
+                self.push("); if let Some(f) = _v.downcast_ref::<f64>() { *f } else if let Some(n) = _v.downcast_ref::<i64>() { *n as f64 } else if let Some(s) = _v.downcast_ref::<String>() { s.parse::<f64>().unwrap_or(0.0) } else { 0.0f64 } }");
+                true
+            }
+            "int_to_float" if args.len() == 1 => {
+                self.push("((");
+                self.emit_expr(&args[0]);
+                self.push(") as f64)");
+                true
+            }
+            "float_to_int" if args.len() == 1 => {
+                self.push("((");
+                self.emit_expr(&args[0]);
+                self.push(") as i64)");
                 true
             }
 
@@ -3255,6 +3493,42 @@ impl CodeGen {
                 self.push("_star_json_encode(&(");
                 self.emit_expr(&args[0]);
                 self.push(")) }");
+                true
+            }
+
+            // ── CSV ─────────────────────────────────────────────────────
+            "csv_parse" if args.len() == 1 => {
+                self.push("{ ");
+                self.push(Self::CSV_HELPER);
+                self.push("_star_csv_parse(&");
+                self.emit_expr(&args[0]);
+                self.push(") }");
+                true
+            }
+            "csv_encode" if args.len() == 1 => {
+                self.push("{ ");
+                self.push(Self::CSV_HELPER);
+                self.push("_star_csv_encode(&");
+                self.emit_expr(&args[0]);
+                self.push(") }");
+                true
+            }
+
+            // ── TOML ────────────────────────────────────────────────────
+            "toml_parse" if args.len() == 1 => {
+                self.push("{ ");
+                self.push(Self::TOML_HELPER);
+                self.push("_star_toml_parse(&");
+                self.emit_expr(&args[0]);
+                self.push(") }");
+                true
+            }
+            "toml_encode" if args.len() == 1 => {
+                self.push("{ ");
+                self.push(Self::TOML_HELPER);
+                self.push("_star_toml_encode(&");
+                self.emit_expr(&args[0]);
+                self.push(") }");
                 true
             }
 
@@ -3835,6 +4109,18 @@ impl CodeGen {
                 self.emit_string_interp(parts);
             }
             ExprKind::BoolLit(b) => self.push(if *b { "true" } else { "false" }),
+            ExprKind::CharLit(c) => {
+                let escaped = match c {
+                    '\n' => "'\\n'".to_string(),
+                    '\t' => "'\\t'".to_string(),
+                    '\r' => "'\\r'".to_string(),
+                    '\\' => "'\\\\'".to_string(),
+                    '\'' => "'\\''".to_string(),
+                    '\0' => "'\\0'".to_string(),
+                    _ => format!("'{c}'"),
+                };
+                self.push(&escaped);
+            }
 
             ExprKind::Ident(name) => {
                 let qualified = self.qualify_variant(name);
@@ -3895,6 +4181,8 @@ impl CodeGen {
                 let op_str = match op {
                     UnaryOp::Neg => "-",
                     UnaryOp::Not => "!",
+                    UnaryOp::Deref => "*",
+                    UnaryOp::Ref => "&",
                 };
                 self.push(op_str);
                 self.emit_expr(inner);
@@ -4165,8 +4453,24 @@ impl CodeGen {
                 self.push("}");
             }
 
+            ExprKind::Loop(body) => {
+                self.push("loop {\n");
+                self.indent();
+                self.emit_indent();
+                self.emit_expr(body);
+                self.push(";\n");
+                self.dedent();
+                self.emit_indent();
+                self.push("}");
+            }
+
             ExprKind::Break => {
                 self.push("break");
+            }
+
+            ExprKind::BreakValue(expr) => {
+                self.push("break ");
+                self.emit_expr(expr);
             }
 
             ExprKind::Continue => {
@@ -6728,13 +7032,25 @@ mod tests {
     #[test]
     fn test_to_int_builtin() {
         let rust = compile(r#"fn main() = to_int("42")"#);
-        assert!(rust.contains(".parse::<i64>()"));
+        assert!(rust.contains("downcast_ref::<i64>()"));
     }
 
     #[test]
     fn test_to_float_builtin() {
         let rust = compile(r#"fn main() = to_float("3.14")"#);
-        assert!(rust.contains(".parse::<f64>()"));
+        assert!(rust.contains("downcast_ref::<f64>()"));
+    }
+
+    #[test]
+    fn test_int_to_float_builtin() {
+        let rust = compile("fn main() = int_to_float(42)");
+        assert!(rust.contains("as f64"));
+    }
+
+    #[test]
+    fn test_float_to_int_builtin() {
+        let rust = compile("fn main() = float_to_int(3.14)");
+        assert!(rust.contains("as i64"));
     }
 
     #[test]
@@ -7420,6 +7736,16 @@ mod tests {
         assert!(!rust.contains("Box<"));
     }
 
+    #[test]
+    fn test_mutual_recursion_boxing() {
+        let rust = compile(
+            "type Expr =\n  | Lit(Int)\n  | Add(Expr, Expr)\n  | Wrapped(Stmt)\n\ntype Stmt =\n  | ExprStmt(Expr)\n  | Block(List<Stmt>)"
+        );
+        // Both types participate in a cycle: Expr -> Stmt -> Expr
+        assert!(rust.contains("Box<Stmt>"), "Expr's Wrapped(Stmt) field should be boxed: {}", rust);
+        assert!(rust.contains("Box<Expr>"), "Stmt's ExprStmt(Expr) field should be boxed: {}", rust);
+    }
+
     // ── Variant name qualification ──────────────────────────────
 
     #[test]
@@ -7689,5 +8015,55 @@ end"#);
     fn test_move_lambda_codegen() {
         let rust = compile("fn main() = do\n  let x = 42\n  spawn(move fn() => println(x))\nend");
         assert!(rust.contains("move ||") || rust.contains("move |"));
+    }
+
+    // ── Deref and ref codegen ────────────────────────────────────
+
+    #[test]
+    fn test_deref_codegen() {
+        let rust = compile("fn main() = do\n  let x = 42\n  let y = *x\nend");
+        assert!(rust.contains("*x"), "Expected deref '*x' in output: {}", rust);
+    }
+
+    #[test]
+    fn test_ref_codegen() {
+        let rust = compile("fn main() = do\n  let x = 42\n  let y = &x\nend");
+        assert!(rust.contains("&x"), "Expected ref '&x' in output: {}", rust);
+    }
+
+    #[test]
+    fn test_char_literal_codegen() {
+        let rust = compile("fn main() = 'a'");
+        assert!(rust.contains("'a'"), "Expected char literal 'a' in output: {}", rust);
+    }
+
+    #[test]
+    fn test_char_literal_escape_codegen() {
+        let rust = compile(r"fn main() = '\n'");
+        assert!(rust.contains(r"'\n'"), "Expected escaped char literal in output: {}", rust);
+    }
+
+    #[test]
+    fn test_csv_parse() {
+        let rust = compile(r#"fn main() = csv_parse("a,b\n1,2")"#);
+        assert!(rust.contains("_star_csv_parse"));
+    }
+
+    #[test]
+    fn test_csv_encode() {
+        let rust = compile(r#"fn main() = csv_encode([[]])"#);
+        assert!(rust.contains("_star_csv_encode"));
+    }
+
+    #[test]
+    fn test_toml_parse() {
+        let rust = compile(r#"fn main() = toml_parse("key = \"val\"")"#);
+        assert!(rust.contains("_star_toml_parse"));
+    }
+
+    #[test]
+    fn test_toml_encode() {
+        let rust = compile(r#"fn main() = toml_encode("key = \"val\"")"#);
+        assert!(rust.contains("_star_toml_encode"));
     }
 }

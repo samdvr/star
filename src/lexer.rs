@@ -11,6 +11,7 @@ pub enum TokenKind {
     InterpStr(Vec<(bool, String)>),
     True,
     False,
+    CharLit(char),
 
     // Identifiers and keywords
     Ident(String),
@@ -42,6 +43,7 @@ pub enum TokenKind {
     Impl,
     For,
     While,
+    Loop,
     In,
     Break,
     Continue,
@@ -377,8 +379,37 @@ impl<'a> Lexer<'a> {
                     self.emit(TokenKind::At, span);
                 }
                 b'\'' => {
-                    // Lifetime: 'a, 'b, etc.
+                    // Character literal or lifetime
                     self.advance();
+                    // Try to parse as a character literal: 'x' or '\n'
+                    if self.pos < self.source.len() {
+                        if self.source[self.pos] == b'\\' {
+                            // Possible escape: '\n', '\t', '\\', '\''
+                            if self.pos + 2 < self.source.len() && self.source[self.pos + 2] == b'\'' {
+                                let escaped = match self.source[self.pos + 1] {
+                                    b'n' => Some('\n'),
+                                    b't' => Some('\t'),
+                                    b'r' => Some('\r'),
+                                    b'\\' => Some('\\'),
+                                    b'\'' => Some('\''),
+                                    b'0' => Some('\0'),
+                                    _ => None,
+                                };
+                                if let Some(ch) = escaped {
+                                    self.pos += 3; // skip escape char + closing quote
+                                    self.emit(TokenKind::CharLit(ch), span);
+                                    continue;
+                                }
+                            }
+                        } else if self.pos + 1 < self.source.len() && self.source[self.pos + 1] == b'\'' {
+                            // Single char literal: 'a'
+                            let ch = self.source[self.pos] as char;
+                            self.pos += 2; // skip char + closing quote
+                            self.emit(TokenKind::CharLit(ch), span);
+                            continue;
+                        }
+                    }
+                    // Fall through: it's a lifetime 'a, 'b, etc.
                     let start = self.pos;
                     while self.pos < self.source.len() && (self.source[self.pos].is_ascii_alphanumeric() || self.source[self.pos] == b'_') {
                         self.pos += 1;
@@ -733,6 +764,7 @@ impl<'a> Lexer<'a> {
             "impl" => TokenKind::Impl,
             "for" => TokenKind::For,
             "while" => TokenKind::While,
+            "loop" => TokenKind::Loop,
             "in" => TokenKind::In,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
@@ -1619,5 +1651,53 @@ mod tests {
         let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
         // The lexer should handle @[ for annotations
         assert!(tokens.len() >= 2, "Annotation should produce tokens");
+    }
+
+    #[test]
+    fn test_lex_char_literal() {
+        let tokens = lex("'a'").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::CharLit('a')));
+    }
+
+    #[test]
+    fn test_lex_char_literal_escape_newline() {
+        let tokens = lex(r"'\n'").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::CharLit('\n')));
+    }
+
+    #[test]
+    fn test_lex_char_literal_escape_tab() {
+        let tokens = lex(r"'\t'").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::CharLit('\t')));
+    }
+
+    #[test]
+    fn test_lex_char_literal_escape_backslash() {
+        let tokens = lex(r"'\\'").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::CharLit('\\')));
+    }
+
+    #[test]
+    fn test_lex_char_literal_escape_quote() {
+        let tokens = lex(r"'\''").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::CharLit('\'')));
+    }
+
+    #[test]
+    fn test_lex_lifetime_still_works() {
+        let tokens = lex("'a").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Tick(ref s) if s == "a"));
+    }
+
+    #[test]
+    fn test_lex_lifetime_multi_char() {
+        let tokens = lex("'abc").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Tick(ref s) if s == "abc"));
+    }
+
+    #[test]
+    fn test_lex_char_literal_z() {
+        let tokens = lex("'z'").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::CharLit('z')));
     }
 }
