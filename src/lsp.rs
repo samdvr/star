@@ -40,6 +40,12 @@ pub fn run() {
         definition_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: Some(vec![",".to_string()]),
+            ..Default::default()
+        }),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(
             SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -135,6 +141,26 @@ fn handle_request(connection: &Connection, state: &mut ServerState, req: Request
     let req = match cast_request::<request::DocumentSymbolRequest>(req) {
         Ok((id, params)) => {
             let result = handle_document_symbols(state, &params);
+            let resp = Response::new_ok(id, result);
+            connection.sender.send(Message::Response(resp)).unwrap();
+            return;
+        }
+        Err(req) => req,
+    };
+
+    let req = match cast_request::<request::SignatureHelpRequest>(req) {
+        Ok((id, params)) => {
+            let result = handle_signature_help(state, &params);
+            let resp = Response::new_ok(id, result);
+            connection.sender.send(Message::Response(resp)).unwrap();
+            return;
+        }
+        Err(req) => req,
+    };
+
+    let req = match cast_request::<request::InlayHintRequest>(req) {
+        Ok((id, params)) => {
+            let result = handle_inlay_hints(state, &params);
             let resp = Response::new_ok(id, result);
             connection.sender.send(Message::Response(resp)).unwrap();
             return;
@@ -493,6 +519,169 @@ fn handle_document_symbols(
         .collect();
 
     Some(DocumentSymbolResponse::Flat(symbols))
+}
+
+// ── Signature Help ──────────────────────────────────────────────────────
+
+fn handle_signature_help(
+    state: &ServerState,
+    params: &SignatureHelpParams,
+) -> Option<SignatureHelp> {
+    let uri = &params.text_document_position_params.text_document.uri;
+    let pos = params.text_document_position_params.position;
+
+    let (source, _) = state.documents.get(uri)?;
+    let analysis = state.analysis.get(uri)?;
+
+    // Find the function name at or before the cursor on the current line
+    let line_text = source.lines().nth(pos.line as usize)?;
+    let col = pos.character as usize;
+    let before_cursor = &line_text[..col.min(line_text.len())];
+
+    // Walk backwards from cursor to find the function call context
+    // Look for the nearest unmatched '(' to find the function name
+    let mut depth = 0i32;
+    let mut paren_pos = None;
+    for (i, ch) in before_cursor.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                if depth == 0 {
+                    paren_pos = Some(i);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    let paren_idx = paren_pos?;
+    // Extract function name before the '('
+    let before_paren = before_cursor[..paren_idx].trim_end();
+    let func_name: String = before_paren
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+
+    if func_name.is_empty() {
+        return None;
+    }
+
+    // Count active parameter (number of commas at depth 0 after the open paren)
+    let after_paren = &before_cursor[paren_idx + 1..];
+    let mut active_param = 0u32;
+    let mut d = 0i32;
+    for ch in after_paren.chars() {
+        match ch {
+            '(' | '[' | '{' => d += 1,
+            ')' | ']' | '}' => d -= 1,
+            ',' if d == 0 => active_param += 1,
+            _ => {}
+        }
+    }
+
+    // Look up the function in definitions
+    for def in &analysis.definitions {
+        if def.name == func_name {
+            if let Some(detail) = &def.detail {
+                let sig = SignatureInformation {
+                    label: detail.clone(),
+                    documentation: None,
+                    parameters: extract_params(detail),
+                    active_parameter: Some(active_param),
+                };
+                return Some(SignatureHelp {
+                    signatures: vec![sig],
+                    active_signature: Some(0),
+                    active_parameter: Some(active_param),
+                });
+            }
+        }
+    }
+
+    // Check builtins — provide basic signature from the builtin arity table
+    if analysis.builtin_names.contains(&func_name) {
+        let sig = SignatureInformation {
+            label: format!("{func_name}(...)"),
+            documentation: Some(Documentation::String("builtin function".to_string())),
+            parameters: None,
+            active_parameter: Some(active_param),
+        };
+        return Some(SignatureHelp {
+            signatures: vec![sig],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        });
+    }
+
+    None
+}
+
+/// Extract parameter labels from a function detail string like "fn foo(a, b, c)"
+fn extract_params(detail: &str) -> Option<Vec<ParameterInformation>> {
+    let start = detail.find('(')?;
+    let end = detail.rfind(')')?;
+    let inner = &detail[start + 1..end];
+    if inner.trim().is_empty() {
+        return Some(vec![]);
+    }
+    let params: Vec<ParameterInformation> = inner
+        .split(',')
+        .map(|p| ParameterInformation {
+            label: ParameterLabel::Simple(p.trim().to_string()),
+            documentation: None,
+        })
+        .collect();
+    Some(params)
+}
+
+// ── Inlay Hints ─────────────────────────────────────────────────────────
+
+fn handle_inlay_hints(
+    state: &ServerState,
+    params: &InlayHintParams,
+) -> Option<Vec<InlayHint>> {
+    let uri = &params.text_document.uri;
+    let analysis = state.analysis.get(uri)?;
+
+    let mut hints = Vec::new();
+
+    // Show type hints for let bindings that have inferred types
+    for (span, name, ty) in &analysis.type_at {
+        let line = span.line.saturating_sub(1) as u32; // 1-indexed → 0-indexed
+        let col = span.col.saturating_sub(1) as u32;
+
+        // Only show for the range visible in the editor request
+        if line < params.range.start.line || line > params.range.end.line {
+            continue;
+        }
+
+        // Skip if the type is unhelpful
+        if ty == "?" || ty.starts_with('_') || ty == "()" {
+            continue;
+        }
+
+        // Position the hint after the name
+        let position = Position::new(line, col + name.len() as u32);
+
+        hints.push(InlayHint {
+            position,
+            label: InlayHintLabel::String(format!(": {ty}")),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: None,
+            padding_right: Some(true),
+            data: None,
+        });
+    }
+
+    Some(hints)
 }
 
 // ── Semantic Tokens ──────────────────────────────────────────────────────

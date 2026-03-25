@@ -406,6 +406,9 @@ fn run_compiler(command: &str, file_arg: Option<&str>, release: bool, test_filte
     if rust_code.contains("native_tls::") {
         auto_deps.push_str("native-tls = \"0.2\"\n");
     }
+    if rust_code.contains("libc::") {
+        auto_deps.push_str("libc = \"0.2\"\n");
+    }
 
     // Merge manifest deps with auto-detected deps
     let (pkg_name, deps_section, metadata_comments) = match &maybe_manifest {
@@ -420,21 +423,33 @@ fn run_compiler(command: &str, file_arg: Option<&str>, release: bool, test_filte
         None => ("star-output".to_string(), auto_deps.trim_end().to_string(), String::new()),
     };
 
-    fs::write(
-        format!("{build_dir}/Cargo.toml"),
-        format!(
-            r#"{metadata_comments}[package]
+    // Incremental compilation: skip cargo build if generated code hasn't changed
+    let main_rs_path = format!("{build_dir}/src/main.rs");
+    let cargo_toml_content = format!(
+        r#"{metadata_comments}[package]
 name = "{pkg_name}"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 {deps_section}"#
-        ),
-    )
-    .map_err(|e| format!("Cannot write Cargo.toml: {e}"))?;
+    );
+    let code_unchanged = fs::read_to_string(&main_rs_path)
+        .ok()
+        .map_or(false, |old| old == rust_code)
+        && fs::read_to_string(format!("{build_dir}/Cargo.toml"))
+            .ok()
+            .map_or(false, |old| old == cargo_toml_content);
 
-    fs::write(format!("{build_dir}/src/main.rs"), &rust_code)
+    // Determine if binary exists
+    let binary_profile = if release { "release" } else { "debug" };
+    let binary_path = format!("{build_dir}/target/{binary_profile}/{pkg_name}");
+    let binary_exists = Path::new(&binary_path).exists();
+
+    fs::write(format!("{build_dir}/Cargo.toml"), &cargo_toml_content)
+        .map_err(|e| format!("Cannot write Cargo.toml: {e}"))?;
+
+    fs::write(&main_rs_path, &rust_code)
         .map_err(|e| format!("Cannot write main.rs: {e}"))?;
 
     // Cargo.lock preservation: copy Star.lock → .star-build/Cargo.lock before build
@@ -443,31 +458,33 @@ edition = "2024"
         let _ = fs::copy("Star.lock", format!("{build_dir}/Cargo.lock"));
     }
 
-    // Build
-    let mut build_cmd = Command::new("cargo");
-    build_cmd.arg("build");
-    if release {
-        build_cmd.arg("--release");
-    }
-    let output = build_cmd
-        .current_dir(build_dir)
-        .output()
-        .map_err(|e| format!("Cannot run cargo: {e}"))?;
+    // Build (skip if source unchanged and binary exists)
+    if !(code_unchanged && binary_exists) {
+        let mut build_cmd = Command::new("cargo");
+        build_cmd.arg("build");
+        if release {
+            build_cmd.arg("--release");
+        }
+        let output = build_cmd
+            .current_dir(build_dir)
+            .output()
+            .map_err(|e| format!("Cannot run cargo: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Build source map and rewrite error locations to reference Star source
-        let source_map = build_source_map(&rust_code);
-        if !stdout.is_empty() {
-            let rewritten = rewrite_rustc_errors(&stdout, &source_map, &file);
-            eprint!("{rewritten}");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Build source map and rewrite error locations to reference Star source
+            let source_map = build_source_map(&rust_code);
+            if !stdout.is_empty() {
+                let rewritten = rewrite_rustc_errors(&stdout, &source_map, &file);
+                eprint!("{rewritten}");
+            }
+            if !stderr.is_empty() {
+                let rewritten = rewrite_rustc_errors(&stderr, &source_map, &file);
+                eprint!("{rewritten}");
+            }
+            return Err("Rust compilation failed".to_string());
         }
-        if !stderr.is_empty() {
-            let rewritten = rewrite_rustc_errors(&stderr, &source_map, &file);
-            eprint!("{rewritten}");
-        }
-        return Err("Rust compilation failed".to_string());
     }
 
     // Cargo.lock preservation: copy .star-build/Cargo.lock → Star.lock after build
@@ -729,6 +746,9 @@ fn detect_deps(rust_code: &str) -> String {
     }
     if rust_code.contains("native_tls::") {
         deps.push_str("native-tls = \"0.2\"\n");
+    }
+    if rust_code.contains("libc::") {
+        deps.push_str("libc = \"0.2\"\n");
     }
     deps
 }

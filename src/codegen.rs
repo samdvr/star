@@ -279,6 +279,100 @@ impl CodeGen {
         "\n"
     );
 
+    /// Inline YAML parser/encoder emitted into generated code.
+    const YAML_HELPER: &str = concat!(
+        "#[derive(Clone, Debug)] ",
+        "enum _StarYaml { Null, Str(String), Int(i64), Float(f64), Bool(bool), List(Vec<_StarYaml>), Map(Vec<(String, _StarYaml)>) } ",
+        "impl std::fmt::Display for _StarYaml { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { ",
+        "_StarYaml::Null => write!(f, \"null\"), ",
+        "_StarYaml::Str(s) => write!(f, \"\\\"{}\\\"\", s.replace('\\\\', \"\\\\\\\\\").replace('\"', \"\\\\\\\"\")), ",
+        "_StarYaml::Int(n) => write!(f, \"{}\", n), ",
+        "_StarYaml::Float(n) => { if *n == (*n as i64) as f64 && !n.is_nan() && !n.is_infinite() { write!(f, \"{}.0\", *n as i64) } else { write!(f, \"{}\", n) } } ",
+        "_StarYaml::Bool(b) => write!(f, \"{}\", b), ",
+        "_StarYaml::List(arr) => { write!(f, \"[\")?; for (i, v) in arr.iter().enumerate() { if i > 0 { write!(f, \", \")?; } write!(f, \"{}\", v)?; } write!(f, \"]\") } ",
+        "_StarYaml::Map(pairs) => { write!(f, \"{{\")?; for (i, (k, v)) in pairs.iter().enumerate() { if i > 0 { write!(f, \", \")?; } write!(f, \"\\\"{}\\\": {}\", k, v)?; } write!(f, \"}}\") } ",
+        "} } } ",
+        "fn _star_yaml_parse_value(val: &str) -> _StarYaml { ",
+        "let val = val.trim(); ",
+        "if val.is_empty() || val == \"~\" || val == \"null\" || val == \"Null\" || val == \"NULL\" { return _StarYaml::Null; } ",
+        "if val == \"true\" || val == \"True\" || val == \"TRUE\" || val == \"yes\" || val == \"Yes\" || val == \"on\" || val == \"On\" { return _StarYaml::Bool(true); } ",
+        "if val == \"false\" || val == \"False\" || val == \"FALSE\" || val == \"no\" || val == \"No\" || val == \"off\" || val == \"Off\" { return _StarYaml::Bool(false); } ",
+        "if (val.starts_with('\"') && val.ends_with('\"')) || (val.starts_with('\\'') && val.ends_with('\\'')) { ",
+        "return _StarYaml::Str(val[1..val.len()-1].to_string()); } ",
+        "if val.starts_with('[') && val.ends_with(']') { ",
+        "let inner = val[1..val.len()-1].trim(); ",
+        "if inner.is_empty() { return _StarYaml::List(Vec::new()); } ",
+        "let items: Vec<_StarYaml> = inner.split(',').map(|s| _star_yaml_parse_value(s)).collect(); ",
+        "return _StarYaml::List(items); } ",
+        "if val.starts_with('{') && val.ends_with('}') { ",
+        "let inner = val[1..val.len()-1].trim(); ",
+        "if inner.is_empty() { return _StarYaml::Map(Vec::new()); } ",
+        "let mut pairs = Vec::new(); ",
+        "for part in inner.split(',') { if let Some((k, v)) = part.split_once(':') { ",
+        "pairs.push((k.trim().trim_matches('\"').trim_matches('\\'').to_string(), _star_yaml_parse_value(v))); } } ",
+        "return _StarYaml::Map(pairs); } ",
+        "if val.contains('.') { if let Ok(f) = val.parse::<f64>() { return _StarYaml::Float(f); } } ",
+        "if let Ok(n) = val.parse::<i64>() { return _StarYaml::Int(n); } ",
+        "_StarYaml::Str(val.to_string()) } ",
+        "fn _star_yaml_parse(input: &str) -> Result<String, String> { ",
+        "let mut root: Vec<(String, _StarYaml)> = Vec::new(); ",
+        "let mut current_key: Option<String> = None; ",
+        "let mut list_items: Vec<_StarYaml> = Vec::new(); ",
+        "let mut in_list = false; ",
+        "for line in input.lines() { ",
+        "let trimmed = line.trim(); ",
+        "if trimmed.is_empty() || trimmed.starts_with('#') { continue; } ",
+        "if trimmed.starts_with(\"- \") { ",
+        "let val = &trimmed[2..]; ",
+        "if !in_list && current_key.is_some() { in_list = true; list_items.clear(); } ",
+        "if in_list { list_items.push(_star_yaml_parse_value(val)); } ",
+        "continue; } ",
+        "if in_list { if let Some(key) = current_key.take() { root.push((key, _StarYaml::List(std::mem::take(&mut list_items)))); } in_list = false; } ",
+        "if let Some((key, val)) = trimmed.split_once(':') { ",
+        "let key = key.trim().trim_matches('\"').trim_matches('\\'').to_string(); ",
+        "let val = val.trim(); ",
+        "if val.is_empty() { current_key = Some(key); continue; } ",
+        "root.push((key, _star_yaml_parse_value(val))); } } ",
+        "if in_list { if let Some(key) = current_key.take() { root.push((key, _StarYaml::List(list_items))); } } ",
+        "Ok(format!(\"{}\", _StarYaml::Map(root))) } ",
+        "fn _star_yaml_encode(input: &str) -> String { ",
+        "fn encode_value(v: &_StarYaml, indent: usize) -> String { ",
+        "let pad = \" \".repeat(indent); ",
+        "match v { ",
+        "_StarYaml::Null => \"null\".to_string(), ",
+        "_StarYaml::Str(s) => { if s.contains(':') || s.contains('#') || s.contains('\"') || s.contains('\\'') || s.contains('\\n') { format!(\"\\\"{}\\\"\", s.replace('\"', \"\\\\\\\"\" )) } else { s.clone() } } ",
+        "_StarYaml::Int(n) => format!(\"{}\", n), ",
+        "_StarYaml::Float(f) => format!(\"{}\", f), ",
+        "_StarYaml::Bool(b) => format!(\"{}\", b), ",
+        "_StarYaml::List(arr) => { let mut out = String::new(); for item in arr { out.push_str(&format!(\"\\n{}- {}\", pad, encode_value(item, indent + 2))); } out } ",
+        "_StarYaml::Map(pairs) => { let mut out = String::new(); for (k, v) in pairs { match v { _StarYaml::Map(_) | _StarYaml::List(_) => { out.push_str(&format!(\"\\n{}{}:{}\", pad, k, encode_value(v, indent + 2))); } _ => { out.push_str(&format!(\"\\n{}{}: {}\", pad, k, encode_value(v, indent + 2))); } } } out } ",
+        "} } ",
+        "let parsed = _star_yaml_parse(input); ",
+        "match parsed { Ok(_) => { ",
+        "let mut root: Vec<(String, _StarYaml)> = Vec::new(); ",
+        "let mut current_key: Option<String> = None; ",
+        "let mut list_items: Vec<_StarYaml> = Vec::new(); ",
+        "let mut in_list = false; ",
+        "for line in input.lines() { ",
+        "let trimmed = line.trim(); ",
+        "if trimmed.is_empty() || trimmed.starts_with('#') { continue; } ",
+        "if trimmed.starts_with(\"- \") { ",
+        "let val = &trimmed[2..]; ",
+        "if !in_list && current_key.is_some() { in_list = true; list_items.clear(); } ",
+        "if in_list { list_items.push(_star_yaml_parse_value(val)); } continue; } ",
+        "if in_list { if let Some(key) = current_key.take() { root.push((key, _StarYaml::List(std::mem::take(&mut list_items)))); } in_list = false; } ",
+        "if let Some((key, val)) = trimmed.split_once(':') { ",
+        "let key = key.trim().trim_matches('\"').trim_matches('\\'').to_string(); ",
+        "let val = val.trim(); ",
+        "if val.is_empty() { current_key = Some(key); continue; } ",
+        "root.push((key, _star_yaml_parse_value(val))); } } ",
+        "if in_list { if let Some(key) = current_key.take() { root.push((key, _StarYaml::List(list_items))); } } ",
+        "let result = encode_value(&_StarYaml::Map(root), 0); ",
+        "result.trim_start_matches('\\n').to_string() ",
+        "} Err(_) => String::new() } } ",
+        "\n"
+    );
+
     fn new() -> Self {
         let builtins: HashSet<&'static str> = [
             // I/O
@@ -377,6 +471,10 @@ impl CodeGen {
             "http", "http_with_headers",
             // Conversions
             "to_int", "to_float", "int_to_float", "float_to_int",
+            // Lazy iterators
+            "lazy_map", "lazy_filter", "lazy_take", "lazy_skip",
+            "lazy_chain", "lazy_enumerate", "lazy_flat_map", "lazy_zip",
+            "collect",
             // Utility
             "length",
             // Process
@@ -395,6 +493,8 @@ impl CodeGen {
             "csv_parse", "csv_encode",
             // TOML
             "toml_parse", "toml_encode",
+            // YAML
+            "yaml_parse", "yaml_encode",
             "parse_env_string", "load_env_file",
             "color_red", "color_green", "color_blue", "color_yellow",
             "color_cyan", "color_magenta",
@@ -441,6 +541,11 @@ impl CodeGen {
             "spawn_async", "spawn_blocking",
             // Concurrency — parallel helpers
             "parallel_map",
+            // Smart pointers
+            "rc_new", "rc_clone", "rc_count", "rc_unwrap",
+            "arc_new", "arc_clone", "arc_count", "arc_unwrap",
+            // Signal handling
+            "on_signal", "ignore_signal", "reset_signal",
         ]
         .into_iter()
         .collect();
@@ -1865,6 +1970,108 @@ impl CodeGen {
                 true
             }
 
+            // ── Smart pointers ──────────────────────────────────────────
+            "rc_new" if args.len() == 1 => {
+                self.push("std::rc::Rc::new(");
+                self.emit_expr(&args[0]);
+                self.push(")");
+                true
+            }
+            "rc_clone" if args.len() == 1 => {
+                self.push("std::rc::Rc::clone(&");
+                self.emit_expr(&args[0]);
+                self.push(")");
+                true
+            }
+            "rc_count" if args.len() == 1 => {
+                self.push("(std::rc::Rc::strong_count(&");
+                self.emit_expr(&args[0]);
+                self.push(") as i64)");
+                true
+            }
+            "rc_unwrap" if args.len() == 1 => {
+                self.push("std::rc::Rc::try_unwrap(");
+                self.emit_expr(&args[0]);
+                self.push(").unwrap_or_else(|rc| (*rc).clone())");
+                true
+            }
+            "arc_new" if args.len() == 1 => {
+                self.push("std::sync::Arc::new(");
+                self.emit_expr(&args[0]);
+                self.push(")");
+                true
+            }
+            "arc_clone" if args.len() == 1 => {
+                self.push("std::sync::Arc::clone(&");
+                self.emit_expr(&args[0]);
+                self.push(")");
+                true
+            }
+            "arc_count" if args.len() == 1 => {
+                self.push("(std::sync::Arc::strong_count(&");
+                self.emit_expr(&args[0]);
+                self.push(") as i64)");
+                true
+            }
+            "arc_unwrap" if args.len() == 1 => {
+                self.push("std::sync::Arc::try_unwrap(");
+                self.emit_expr(&args[0]);
+                self.push(").unwrap_or_else(|arc| (*arc).clone())");
+                true
+            }
+
+            // ── Signal handling ──────────────────────────────────────────
+            "on_signal" if args.len() == 2 => {
+                // on_signal(signal_name, handler_fn) — register handler via ctrlc-like pattern
+                // Only SIGINT supported portably; spawns monitoring thread
+                self.push("{ use std::sync::atomic::{AtomicBool, Ordering}; ");
+                self.push("static _SIG_FLAG: AtomicBool = AtomicBool::new(false); ");
+                self.push("let _handler = ");
+                self.emit_expr(&args[1]);
+                self.push("; let _sig_name: String = ");
+                self.emit_expr(&args[0]);
+                self.push(".to_string(); ");
+                self.push("unsafe { let _sig_num: libc::c_int = match _sig_name.as_str() { ");
+                self.push("\"SIGINT\" | \"INT\" | \"int\" => 2, ");
+                self.push("\"SIGTERM\" | \"TERM\" | \"term\" => 15, ");
+                self.push("\"SIGHUP\" | \"HUP\" | \"hup\" => 1, ");
+                self.push("\"SIGUSR1\" | \"USR1\" | \"usr1\" => 10, ");
+                self.push("\"SIGUSR2\" | \"USR2\" | \"usr2\" => 12, ");
+                self.push("_ => panic!(\"unknown signal: {}\", _sig_name), ");
+                self.push("}; extern \"C\" fn _sh(_: libc::c_int) { _SIG_FLAG.store(true, Ordering::SeqCst); } ");
+                self.push("libc::signal(_sig_num, _sh as libc::sighandler_t); } ");
+                self.push("std::thread::spawn(move || { loop { ");
+                self.push("std::thread::sleep(std::time::Duration::from_millis(50)); ");
+                self.push("if _SIG_FLAG.swap(false, Ordering::SeqCst) { _handler(); } } }); }");
+                true
+            }
+            "ignore_signal" if args.len() == 1 => {
+                self.push("unsafe { let _sig_name: String = ");
+                self.emit_expr(&args[0]);
+                self.push(".to_string(); let _sig_num: libc::c_int = match _sig_name.as_str() { ");
+                self.push("\"SIGINT\" | \"INT\" | \"int\" => 2, ");
+                self.push("\"SIGTERM\" | \"TERM\" | \"term\" => 15, ");
+                self.push("\"SIGHUP\" | \"HUP\" | \"hup\" => 1, ");
+                self.push("\"SIGUSR1\" | \"USR1\" | \"usr1\" => 10, ");
+                self.push("\"SIGUSR2\" | \"USR2\" | \"usr2\" => 12, ");
+                self.push("_ => panic!(\"unknown signal: {}\", _sig_name), ");
+                self.push("}; libc::signal(_sig_num, libc::SIG_IGN); }");
+                true
+            }
+            "reset_signal" if args.len() == 1 => {
+                self.push("unsafe { let _sig_name: String = ");
+                self.emit_expr(&args[0]);
+                self.push(".to_string(); let _sig_num: libc::c_int = match _sig_name.as_str() { ");
+                self.push("\"SIGINT\" | \"INT\" | \"int\" => 2, ");
+                self.push("\"SIGTERM\" | \"TERM\" | \"term\" => 15, ");
+                self.push("\"SIGHUP\" | \"HUP\" | \"hup\" => 1, ");
+                self.push("\"SIGUSR1\" | \"USR1\" | \"usr1\" => 10, ");
+                self.push("\"SIGUSR2\" | \"USR2\" | \"usr2\" => 12, ");
+                self.push("_ => panic!(\"unknown signal: {}\", _sig_name), ");
+                self.push("}; libc::signal(_sig_num, libc::SIG_DFL); }");
+                true
+            }
+
             // ── List operations (first arg is the list) ─────────────────
             "map" if args.len() == 2 => {
                 self.emit_expr(&args[0]);
@@ -2248,6 +2455,68 @@ impl CodeGen {
                 self.push(".clone().into_iter()).map(|(_a, _b)| (");
                 self.emit_expr(&args[2]);
                 self.push(")(_a, _b)).collect::<Vec<_>>()");
+                true
+            }
+
+            // ── Lazy iterators ─────────────────────────────────────────
+            "lazy_map" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().map(|_item| (");
+                self.emit_expr(&args[1]);
+                self.push(")(_item.clone())).collect::<Vec<_>>()");
+                true
+            }
+            "lazy_filter" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().filter(|_item| (");
+                self.emit_expr(&args[1]);
+                self.push(")((*_item).clone())).cloned().collect::<Vec<_>>()");
+                true
+            }
+            "lazy_take" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().take(");
+                self.emit_expr(&args[1]);
+                self.push(" as usize).cloned().collect::<Vec<_>>()");
+                true
+            }
+            "lazy_skip" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().skip(");
+                self.emit_expr(&args[1]);
+                self.push(" as usize).cloned().collect::<Vec<_>>()");
+                true
+            }
+            "lazy_chain" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().chain(");
+                self.emit_expr(&args[1]);
+                self.push(".iter()).cloned().collect::<Vec<_>>()");
+                true
+            }
+            "lazy_enumerate" if args.len() == 1 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().enumerate().map(|(i, v)| (i as i64, v.clone())).collect::<Vec<_>>()");
+                true
+            }
+            "lazy_flat_map" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().flat_map(|_item| (");
+                self.emit_expr(&args[1]);
+                self.push(")(_item.clone())).collect::<Vec<_>>()");
+                true
+            }
+            "lazy_zip" if args.len() == 2 => {
+                self.emit_expr(&args[0]);
+                self.push(".iter().zip(");
+                self.emit_expr(&args[1]);
+                self.push(".iter()).map(|(a, b)| (a.clone(), b.clone())).collect::<Vec<_>>()");
+                true
+            }
+            "collect" if args.len() == 1 => {
+                // collect is identity — lazy ops already collect at the end
+                self.emit_expr(&args[0]);
+                self.push(".clone()");
                 true
             }
 
@@ -3527,6 +3796,24 @@ impl CodeGen {
                 self.push("{ ");
                 self.push(Self::TOML_HELPER);
                 self.push("_star_toml_encode(&");
+                self.emit_expr(&args[0]);
+                self.push(") }");
+                true
+            }
+
+            // ── YAML ────────────────────────────────────────────────────
+            "yaml_parse" if args.len() == 1 => {
+                self.push("{ ");
+                self.push(Self::YAML_HELPER);
+                self.push("_star_yaml_parse(&");
+                self.emit_expr(&args[0]);
+                self.push(") }");
+                true
+            }
+            "yaml_encode" if args.len() == 1 => {
+                self.push("{ ");
+                self.push(Self::YAML_HELPER);
+                self.push("_star_yaml_encode(&");
                 self.emit_expr(&args[0]);
                 self.push(") }");
                 true
@@ -8065,5 +8352,53 @@ end"#);
     fn test_toml_encode() {
         let rust = compile(r#"fn main() = toml_encode("key = \"val\"")"#);
         assert!(rust.contains("_star_toml_encode"));
+    }
+
+    #[test]
+    fn test_yaml_parse() {
+        let rust = compile(r#"fn main() = yaml_parse("key: val")"#);
+        assert!(rust.contains("_star_yaml_parse"));
+    }
+
+    #[test]
+    fn test_yaml_encode() {
+        let rust = compile(r#"fn main() = yaml_encode("key: val")"#);
+        assert!(rust.contains("_star_yaml_encode"));
+    }
+
+    #[test]
+    fn test_lazy_map() {
+        let rust = compile("fn main() = lazy_map([1, 2, 3], fn(x) => x * 2)");
+        assert!(rust.contains(".iter().map("));
+    }
+
+    #[test]
+    fn test_lazy_filter() {
+        let rust = compile("fn main() = lazy_filter([1, 2, 3], fn(x) => x > 1)");
+        assert!(rust.contains(".iter().filter("));
+    }
+
+    #[test]
+    fn test_lazy_take() {
+        let rust = compile("fn main() = lazy_take([1, 2, 3], 2)");
+        assert!(rust.contains(".iter().take("));
+    }
+
+    #[test]
+    fn test_rc_new() {
+        let rust = compile("fn main() = rc_new(42)");
+        assert!(rust.contains("std::rc::Rc::new("));
+    }
+
+    #[test]
+    fn test_arc_new() {
+        let rust = compile("fn main() = arc_new(42)");
+        assert!(rust.contains("std::sync::Arc::new("));
+    }
+
+    #[test]
+    fn test_ignore_signal() {
+        let rust = compile(r#"fn main() = ignore_signal("INT")"#);
+        assert!(rust.contains("libc::signal("));
     }
 }

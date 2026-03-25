@@ -258,6 +258,12 @@ impl Infer {
             // Conversions
             ("to_int", 1, 1), ("to_float", 1, 1),
             ("int_to_float", 1, 1), ("float_to_int", 1, 1),
+            // Lazy iterators
+            ("lazy_map", 2, 2), ("lazy_filter", 2, 2),
+            ("lazy_take", 2, 2), ("lazy_skip", 2, 2),
+            ("lazy_chain", 2, 2), ("lazy_enumerate", 1, 1),
+            ("lazy_flat_map", 2, 2), ("lazy_zip", 2, 2),
+            ("collect", 1, 1),
             ("length", 1, 1),
             // Process
             ("exit", 1, 1), ("panic", 1, 1),
@@ -277,6 +283,8 @@ impl Infer {
             ("csv_parse", 1, 1), ("csv_encode", 1, 1),
             // TOML
             ("toml_parse", 1, 1), ("toml_encode", 1, 1),
+            // YAML
+            ("yaml_parse", 1, 1), ("yaml_encode", 1, 1),
             // Env file
             ("parse_env_string", 1, 1), ("load_env_file", 1, 1),
             // Colors & styling
@@ -322,6 +330,11 @@ impl Infer {
             ("atomic_new", 1, 1), ("atomic_get", 1, 1), ("atomic_set", 2, 2), ("atomic_add", 2, 2),
             ("sleep", 1, 1), ("sleep_ms", 1, 1), ("timeout", 2, 2),
             ("spawn_async", 1, 1), ("spawn_blocking", 1, 1), ("parallel_map", 2, 2),
+            // Smart pointers
+            ("rc_new", 1, 1), ("rc_clone", 1, 1), ("rc_count", 1, 1), ("rc_unwrap", 1, 1),
+            ("arc_new", 1, 1), ("arc_clone", 1, 1), ("arc_count", 1, 1), ("arc_unwrap", 1, 1),
+            // Signal handling
+            ("on_signal", 2, 2), ("ignore_signal", 1, 1), ("reset_signal", 1, 1),
             // Extra builtins from typeck that aren't in codegen match but are registered
             ("len", 1, 1), ("type_of", 1, 1),
             ("replace_all", 3, 3), ("trim_matches", 2, 2),
